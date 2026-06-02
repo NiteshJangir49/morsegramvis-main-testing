@@ -1,0 +1,1 @@
+<root><settings><lighting>{'ambient': 50, 'diffuse': 50, 'specular': 100, 'specular power': 100}</lighting><ao>{'ambient occlusion factor': 0, 'kernel size': 128}</ao><rgb>{'red': 0, 'green': 0, 'blue': 0}</rgb><base_folder>C:/Users/nites/Downloads/morsegramvis-main/morsegramvis-main/dataset_files/Steel Beads</base_folder></settings></root>

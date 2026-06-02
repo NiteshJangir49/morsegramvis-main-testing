@@ -32,6 +32,8 @@ class EnsembleView(Window):
         self.last_picked_property = vtk.vtkProperty()
         self.input_raw_data = None
 
+        self.ensamble_opacity = 1.0
+
         start_time = time.time()
 
         self.iren.AddObserver("KeyPressEvent", self.key_press_event)
@@ -40,7 +42,8 @@ class EnsembleView(Window):
         self.ren.AddObserver("EndEvent", self.compute_fps)
 
         # Add the actor to the scene
-        self.ren.AddActor(self.get_ensemble_actor())
+        self.active_ensemble_actor = self.get_ensemble_actor()
+        self.ren.AddActor(self.active_ensemble_actor)
         self.ren.SetBackground(Config.BG_COLOR)
 
         self.ambient_occlusion()
@@ -96,6 +99,19 @@ class EnsembleView(Window):
         self.add_toolbar(toolbar, "ui/icons/cam.png", "Camera Information", self.onToolbarCamInfoAction)
         # export toolbar
         self.add_toolbar(toolbar, "ui/icons/export.png", "Export Scene as Image", self.onToolbarExportAction)
+
+        toolbar.addSeparator()
+
+        self.opacity_label = QtWidgets.QLabel("Opacity: ")
+        toolbar.addWidget(self.opacity_label)
+
+        self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.opacity_slider.setMinimum(0)   
+        self.opacity_slider.setMaximum(100)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.setFixedWidth(100)
+        self.opacity_slider.valueChanged.connect(self.on_opacity_slider_changed)
+        toolbar.addWidget(self.opacity_slider)
 
         # --------------- End Toolbar ----------------
         # reset camera
@@ -160,6 +176,18 @@ class EnsembleView(Window):
         dialog.setLayout(QtWidgets.QVBoxLayout())
         dialog.layout().addWidget(listWidget)
         dialog.show()
+
+    def on_opacity_slider_changed(self, value: int):
+        self.ensemble_opacity = value / 100.0
+        
+        if hasattr(self, 'active_ensemble_actor') and self.active_ensemble_actor:
+            self.active_ensemble_actor.GetProperty().SetOpacity(self.ensemble_opacity)
+            
+            self.active_ensemble_actor.GetProperty().Modified()
+            self.active_ensemble_actor.Modified()
+            
+            if hasattr(self, 'iren') and self.iren:
+                self.iren.GetRenderWindow().Render()
 
     def onToolbarSettingsAction(self, s):
         """

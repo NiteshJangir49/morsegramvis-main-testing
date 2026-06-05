@@ -26,9 +26,23 @@ class EnsembleView(Window):
         self.light_factor = True
         self.ao_factor = True
 
+        self.show_network_only = False
+        self.network_graph_actor = None
+
+        # Explicitly cache your original ensemble mesh actor reference
+        self.active_ensemble_actor = self.get_ensemble_actor()
+        self.ren.AddActor(self.active_ensemble_actor)
+        
+        # Load the data sources just like viewparticles.py does
+        maxima_data_file = utils.read_file(Config.MAXIMAS_FILE)
+        self.maxima_data = utils.get_grains_point_cloud(maxima_data_file)
+        
+        contact_net_data = utils.read_file(Config.CONTACT_NET_FILE)
+        self.contact_points = utils.get_contact_network(contact_net_data)
+
         self.caption_repr = self.get_caption_repr()
         self.last_picked_actor = None
-        self.maxima_data = None
+        # self.maxima_data = None
         self.last_picked_property = vtk.vtkProperty()
         self.input_raw_data = None
 
@@ -100,18 +114,25 @@ class EnsembleView(Window):
         # export toolbar
         self.add_toolbar(toolbar, "ui/icons/export.png", "Export Scene as Image", self.onToolbarExportAction)
 
+        # toolbar.addSeparator()
+
+        # self.opacity_label = QtWidgets.QLabel("Opacity: ")
+        # toolbar.addWidget(self.opacity_label)
+
+        # self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        # self.opacity_slider.setMinimum(0)   
+        # self.opacity_slider.setMaximum(100)
+        # self.opacity_slider.setValue(100)
+        # self.opacity_slider.setFixedWidth(100)
+        # self.opacity_slider.valueChanged.connect(self.on_opacity_slider_changed)
+        # toolbar.addWidget(self.opacity_slider)
+
         toolbar.addSeparator()
-
-        self.opacity_label = QtWidgets.QLabel("Opacity: ")
-        toolbar.addWidget(self.opacity_label)
-
-        self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.opacity_slider.setMinimum(0)   
-        self.opacity_slider.setMaximum(100)
-        self.opacity_slider.setValue(100)
-        self.opacity_slider.setFixedWidth(100)
-        self.opacity_slider.valueChanged.connect(self.on_opacity_slider_changed)
-        toolbar.addWidget(self.opacity_slider)
+        self.graph_mode_btn = QtWidgets.QPushButton("Show Network")
+        self.graph_mode_btn.setCheckable(True)
+        self.graph_mode_btn.setChecked(False)
+        self.graph_mode_btn.clicked.connect(self.on_graph_mode_toggled)
+        toolbar.addWidget(self.graph_mode_btn)
 
         # --------------- End Toolbar ----------------
         # reset camera
@@ -177,17 +198,210 @@ class EnsembleView(Window):
         dialog.layout().addWidget(listWidget)
         dialog.show()
 
-    def on_opacity_slider_changed(self, value: int):
-        self.ensemble_opacity = value / 100.0
+    def build_extremum_graph_actor(self):
+        """Extracts contact coordinates directly from the pre-loaded contact object to form center-to-center edges."""
+        try:
+            print("[Graph] Initializing robust contact point extraction...")
+            
+            maxima_poly = utils.read_file(Config.MAXIMAS_FILE)
+            if not maxima_poly:
+                print("[Graph Error] Maxima data source is empty or None.")
+                return None
+                
+            points = vtk.vtkPoints()
+            lines = vtk.vtkCellArray()
+            
+            # 1. Extract the 1,454 true center coordinates
+            if hasattr(maxima_poly, 'GetPoints') and maxima_poly.GetPoints():
+                points.DeepCopy(maxima_poly.GetPoints())
+            else:
+                print("[Graph Error] Maxima object contains no native VTK points array.")
+                return None
+                
+            num_centers = points.GetNumberOfPoints()
+            print(f"[Graph] Extracted {num_centers} true center nodes.")
+            center_coords = [points.GetPoint(i) for i in range(num_centers)]
+
+            # 2. Extract raw contact points array directly from the data wrapper
+            contact_points_array = None
+            
+            # Case A: It's a direct PolyData object
+            if isinstance(self.contact_points, vtk.vtkPolyData):
+                contact_points_array = self.contact_points.GetPoints()
+            # Case B: It's a VTK Algorithm Output / Filter
+            elif hasattr(self.contact_points, 'GetOutput'):
+                self.contact_points.Update()  # Force execution pass
+                contact_points_array = self.contact_points.GetOutput().GetPoints()
+            # Case C: It's an Actor wrapper, let's extract its underlying mapper geometry
+            elif hasattr(self.contact_points, 'GetMapper') and self.contact_points.GetMapper():
+                mapper_input = self.contact_points.GetMapper().GetInput()
+                if mapper_input and hasattr(mapper_input, 'GetPoints'):
+                    contact_points_array = mapper_input.GetPoints()
+
+            # Absolute Fallback: Re-read the file path directly to guarantee a fresh VTK data handle
+            if contact_points_array is None:
+                print("[Graph] Direct object mapping returned None. Re-reading file via native XML reader...")
+                contact_network_path = r"C:/Users/nites/Downloads/morsegramvis-main/morsegramvis-main/dataset_files/Steel Beads/chamf_distance_Steel_Deposition_181_176_251_downsampled_contacts.vtp"
+                fresh_reader = vtk.vtkXMLPolyDataReader()
+                fresh_reader.SetFileName(contact_network_path)
+                fresh_reader.Update()  # Force VTK to parse the XML arrays into RAM
+                if fresh_reader.GetOutput():
+                    contact_points_array = fresh_reader.GetOutput().GetPoints()
+
+            # 3. Calculate spatial linkages if points array was successfully found
+            if contact_points_array is not None:
+                num_contact_pts = contact_points_array.GetNumberOfPoints()
+                print(f"[Graph] Successfully found contact source array. Processing {num_contact_pts} positions...")
+                
+                existing_edges = set()
+
+                for i in range(num_contact_pts):
+                    contact_pt = contact_points_array.GetPoint(i)
+                    tx, ty, tz = contact_pt
+                    
+                    # Distance check loop to find the 2 closest particle centers
+                    dists = []
+                    for idx, (cx, cy, cz) in enumerate(center_coords):
+                        d = (tx - cx)**2 + (ty - cy)**2 + (tz - cz)**2
+                        dists.append((d, idx))
+                    
+                    dists.sort(key=lambda x: x[0])
+                    
+                    if len(dists) >= 2:
+                        center_idx_a = dists[0][1]
+                        center_idx_b = dists[1][1]
+                        
+                        if center_idx_a != center_idx_b:
+                            edge_pair = tuple(sorted((center_idx_a, center_idx_b)))
+                            if edge_pair not in existing_edges:
+                                existing_edges.add(edge_pair)
+                                
+                                line = vtk.vtkLine()
+                                line.GetPointIds().SetId(0, center_idx_a)
+                                line.GetPointIds().SetId(1, center_idx_b)
+                                lines.InsertNextCell(line)
+            else:
+                print("[Graph Error] Could not extract raw geometry array using any data wrappers.")
+
+            # 4. Assemble and style the network mesh
+            network_polydata = vtk.vtkPolyData()
+            network_polydata.SetPoints(points)
+            network_polydata.SetLines(lines)
+
+            mapper = vtk.vtkPolyDataMapper()
+            mapper.SetInputData(network_polydata)
+            
+            actor = vtk.vtkActor()
+            actor.SetMapper(mapper)
+            
+            property_obj = actor.GetProperty()
+            property_obj.SetColor(1.0, 1.0, 1.0)
+            property_obj.SetLineWidth(0.3)
+            property_obj.LightingOff()
+            
+            print(f"[Graph Success] Network rendering complete. Built {lines.GetNumberOfCells()} center edges.")
+            return actor
+
+        except Exception as e:
+            print(f"[Graph Critical Error] Network reconstruction failed: {e}")
+            return None
+
+    def on_graph_mode_toggled(self, checked: bool):
+        """Strictly alternates visibility and prevents black-screen locking on error."""
+        self.show_network_only = checked
         
+        if self.show_network_only:
+            self.graph_mode_btn.setText("Show Mesh")
+            
+            # Lazy load the network graph actor only when first requested
+            if self.network_graph_actor is None:
+                self.network_graph_actor = self.build_extremum_graph_actor()
+                
+                # RECOVERY CHECK: If building failed, abort immediately and keep mesh on screen
+                if self.network_graph_actor is None:
+                    print("[UI Error] Aborting network view pass: Could not process network coordinates.")
+                    self.show_network_only = False
+                    self.graph_mode_btn.setChecked(False)
+                    self.graph_mode_btn.setText("Show Network")
+                else:
+                    self.ren.AddActor(self.network_graph_actor)
+        else:
+            self.graph_mode_btn.setText("Show Network")
+
+        # ===================================================================
+        # VISIBILITY MANAGER WITH FALLBACK DEFENSE
+        # ===================================================================
+        if hasattr(self, 'ren') and self.ren:
+            actor_collection = self.ren.GetActors()
+            if actor_collection:
+                actor_collection.InitTraversal()
+                
+                for _ in range(actor_collection.GetNumberOfItems()):
+                    current_actor = actor_collection.GetNextActor()
+                    if current_actor:
+                        if self.show_network_only:
+                            if current_actor == self.network_graph_actor:
+                                current_actor.SetVisibility(True)
+                            else:
+                                current_actor.SetVisibility(False)
+                        else:
+                            # Safely restore everything back to visible when toggle is off
+                            if current_actor == self.network_graph_actor:
+                                current_actor.SetVisibility(False)
+                            else:
+                                current_actor.SetVisibility(True)
+                                
+                        current_actor.Modified()
+
+        # Render the fresh view state updates
+        if hasattr(self, 'iren') and self.iren:
+            self.iren.GetRenderWindow().Render()
+
+    def on_opacity_slider_changed(self, value: int):
+        """Updates ensemble mesh transparency by forcing VTK to allow alpha blending passes."""
+        self.ensemble_opacity = value / 100.0
+        is_graph_mode = getattr(self, 'show_network_only', False)
+
         if hasattr(self, 'active_ensemble_actor') and self.active_ensemble_actor:
-            self.active_ensemble_actor.GetProperty().SetOpacity(self.ensemble_opacity)
             
-            self.active_ensemble_actor.GetProperty().Modified()
-            self.active_ensemble_actor.Modified()
+            # Helper function to apply both the opacity and the critical rendering pass flags
+            def apply_translucency_flags(actor, opacity):
+                actor.GetProperty().SetOpacity(opacity)
+                
+                # CRITICAL: Force VTK out of the opaque cache queue when transparent
+                if opacity < 1.0:
+                    actor.ForceTranslucentOn()
+                    actor.ForceOpaqueOff()
+                else:
+                    actor.ForceTranslucentOff()
+                    actor.ForceOpaqueOn()
+                
+                actor.GetProperty().Modified()
+                actor.Modified()
+
+            # --- CASE A: Handle Assembly Parts ---
+            if hasattr(self.active_ensemble_actor, 'GetParts'):
+                collection = self.active_ensemble_actor.GetParts()
+                if collection:
+                    collection.InitTraversal()
+                    for i in range(collection.GetNumberOfItems()):
+                        part = collection.GetNextActor()
+                        if part:
+                            apply_translucency_flags(part, self.ensemble_opacity)
+                            
+            # --- CASE B: Handle Standalone Actor ---
+            else:
+                apply_translucency_flags(self.active_ensemble_actor, self.ensemble_opacity)
             
-            if hasattr(self, 'iren') and self.iren:
-                self.iren.GetRenderWindow().Render()
+            # Maintain the view mode toggle visibility rule
+            if is_graph_mode:
+                self.active_ensemble_actor.SetVisibility(False)
+            else:
+                self.active_ensemble_actor.SetVisibility(True)
+
+        # Force the active render window context to redraw everything right now
+        if hasattr(self, 'iren') and self.iren:
+            self.iren.GetRenderWindow().Render()
 
     def onToolbarSettingsAction(self, s):
         """

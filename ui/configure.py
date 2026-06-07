@@ -3,6 +3,30 @@ from settings import Config
 import core.xmlutils as xmlutils
 import os
 
+MATERIAL_PRESETS = {
+    "Custom": None,
+    "Metal": {
+        "ambient": 35,
+        "specular": 90,
+        "diffuse": 60,
+        # "ambient_power": 40,
+        "specular power": 80
+    },
+    "Sand": {
+        "ambient": 35,
+        "specular": 10,
+        "diffuse": 85,
+        # "ambient_power": 30,
+        "specular power": 5
+    },
+    "Wood": {
+        "ambient": 35,
+        "specular": 20,
+        "diffuse": 70,
+        # "ambient_power": 50,
+        "specular power": 15
+    }
+}
 
 def get_HLine():
     '''
@@ -33,133 +57,261 @@ def get_form(parent=None):
     @param parent: the parent widget
     @return: the form
     '''
+    # ===================================================================
+    # 1. CENTRAL ENGINE CALLBACKS & STATE SYNC HELPERS
+    # ===================================================================
+    parent._updating_from_preset = False
+
+    def get_real_3d_window():
+        """Finds the active 'Start' window wrapper and extracts its inner viewport context."""
+        app = QtWidgets.QApplication.instance()
+        if app:
+            for widget in app.topLevelWidgets():
+                # 1. Target our main application window class container
+                if widget.__class__.__name__ == 'Start':
+                    # If the window itself holds a direct link to the view object
+                    if hasattr(widget, 'view'):
+                        return getattr(widget, 'view')
+                    if hasattr(widget, 'ensemble_view'):
+                        return getattr(widget, 'ensemble_view')
+                    
+                    # 2. Deep structural tree lookup: find an embedded EnsembleView class inside the window frame
+                    if hasattr(widget, 'findChild'):
+                        # Dynamically seek any child component matching our target rendering view signature
+                        for child in widget.findChildren(QtWidgets.QWidget):
+                            if child.__class__.__name__ == 'EnsembleView':
+                                return child
+                    
+                    # 3. Flat attribute search: look inside the object's variables for an active view context
+                    for attr_name in dir(widget):
+                        try:
+                            attr_val = getattr(widget, attr_name)
+                            if attr_val.__class__.__name__ == 'EnsembleView':
+                                return attr_val
+                        except Exception:
+                            continue
+                            
+                    # Fallback directly to the main 'Start' object container itself
+                    return widget
+        return None
+
+    def sync_background_config_state(prop_name, integer_value):
+        """Updates persistent state tracking variables on the rendering engine window target."""
+        float_val = integer_value / 100.0 if prop_name != 'specular power' else float(integer_value)
+        
+        view_window = get_real_3d_window()
+        if view_window:
+            # Overwrite both standard properties and underscore variations seamlessly
+            if prop_name == 'ambient': view_window.current_ambient = float_val
+            elif prop_name == 'diffuse': view_window.current_diffuse = float_val
+            elif prop_name == 'specular': view_window.current_specular = float_val
+            elif prop_name == 'specular power': view_window.current_specular_power = float_val
+
+    def update_live_vtk_property(prop_name, integer_value):
+        """Finds active VTK canvas pipelines inside the view window context and pushes live adjustments."""
+        if prop_name != 'refresh':
+            sync_background_config_state(prop_name, integer_value)
+        
+        view_window = get_real_3d_window()
+        if view_window is None:
+            return
+
+        renderer = None
+        interactor = None
+        
+        # Scan both the extracted view widget and the parent application window for active VTK contexts
+        search_targets = [view_window]
+        if hasattr(view_window, 'parentWidget') and view_window.parentWidget():
+            search_targets.append(view_window.parentWidget())
+            
+        for target in search_targets:
+            for attr in ['ren', 'renderer']:
+                if hasattr(target, attr) and getattr(target, attr) is not None:
+                    renderer = getattr(target, attr)
+                    break
+            for attr in ['iren', 'interactor']:
+                if hasattr(target, attr) and getattr(target, attr) is not None:
+                    obj = getattr(target, attr)
+                    interactor = obj.GetRenderWindow() if hasattr(obj, 'GetRenderWindow') else obj
+                    break
+
+        # Fallback deep lookup search for VTK contexts hidden inside generic embedded widgets
+        if renderer is None and hasattr(view_window, 'findChildren'):
+            for child in view_window.findChildren(QtWidgets.QWidget):
+                if hasattr(child, 'ren') and getattr(child, 'ren') is not None:
+                    renderer = child.ren
+                    if hasattr(child, 'iren'): interactor = child.iren.GetRenderWindow() if hasattr(child.iren, 'GetRenderWindow') else child.iren
+                    break
+
+        # Apply parameters onto live graphics actors pipelines
+        if renderer is not None:
+            actor_collection = renderer.GetActors()
+            if actor_collection:
+                actor_collection.InitTraversal()
+                for _ in range(actor_collection.GetNumberOfItems()):
+                    actor = actor_collection.GetNextActor()
+                    if actor and hasattr(actor, 'GetProperty'):
+                        prop = actor.GetProperty()
+                        prop.SetAmbient(getattr(view_window, 'current_ambient', 0.5))
+                        prop.SetDiffuse(getattr(view_window, 'current_diffuse', 0.5))
+                        prop.SetSpecular(getattr(view_window, 'current_specular', 1.0))
+                        prop.SetSpecularPower(getattr(view_window, 'current_specular_power', 100.0))
+            
+        if interactor is not None:
+            interactor.Render()
+
+    def check_for_custom_override():
+        """Bounces the dropdown menu state to 'Custom' if a slider handle is moved manually."""
+        if not getattr(parent, '_updating_from_preset', False):
+            if hasattr(parent, 'material_dropdown'):
+                parent.material_dropdown.blockSignals(True)
+                parent.material_dropdown.setCurrentText("Custom")
+                parent.material_dropdown.blockSignals(False)
+
+    def on_material_changed(material_name):
+        """Processes preset choices, moves slider positions, and forces a scene redraw."""
+        preset = MATERIAL_PRESETS.get(material_name)
+        if preset is None: 
+            return  # Custom chosen: leave parameters as-is
+            
+        parent._updating_from_preset = True
+        try:
+            # Shift the UI handles programmatically
+            for key, value in preset.items():
+                if key in parent.lighting and parent.lighting[key] is not None:
+                    parent.lighting[key].setValue(value)
+                    sync_background_config_state(key, value)
+            
+            # Fire a direct scene update sweep
+            update_live_vtk_property('refresh', 0)
+        finally:
+            parent._updating_from_preset = False
+
+    # ===================================================================
+    # 2. STANDALONE UI LAYOUT & WIDGET ASSEMBLY
+    # ===================================================================
     window = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout()
     label = QtWidgets.QLabel("Select a folder")
-    # Create the button and line edit
     button = QtWidgets.QPushButton("Select Folder")
     parent.lineEdit = QtWidgets.QLineEdit()
 
-    # connect lineEdit to button click
     button.clicked.connect(lambda: parent.lineEdit.setText(selectFolder()))
-
-    # Set the alignment of the text in the line edit to center
     parent.lineEdit.setAlignment(QtCore.Qt.AlignCenter)
 
-    # add the button and line edit to the layout
     folder_layout = QtWidgets.QHBoxLayout()
     folder_layout.addWidget(label)
     folder_layout.addWidget(parent.lineEdit)
     folder_layout.addWidget(button)
 
     layout.addLayout(folder_layout)
-
-    # add seperator as horizontal line
-    
     layout.addWidget(get_HLine())
 
-    # add rgb sliders
-    # vertical layout
+    # --- RGB Sliders Block ---
     rgb_layout = QtWidgets.QVBoxLayout()
     parent.rgb = {'red' : None, 'green' : None, 'blue' : None}
     for c in parent.rgb.keys():
-        # horizontal layout
         h_layout = QtWidgets.QHBoxLayout()
-        # label
         c_label = QtWidgets.QLabel(c)
-        # size
         c_label.setFixedSize(50, 20)
         h_layout.addWidget(c_label)
-        # slider
+        
         slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         slider.setRange(0, 255)
-        # label / numerical value corresponding to slider
+        
         slider_label = QtWidgets.QLabel("0")
         slider_label.setFixedSize(50, 20)
-        # connect slider to label and add to dict
         slider.valueChanged.connect(lambda value, label=slider_label: label.setText(str(value)))
+        
         h_layout.addWidget(slider)
         h_layout.addWidget(slider_label)
-        # add to vertical layout
         rgb_layout.addLayout(h_layout)
         parent.rgb[c] = slider
 
     layout.addLayout(rgb_layout)
     layout.addWidget(get_HLine())
 
-    # lighting sliders - ambient(0, 1), diffuse(0, 1), 
-    # specular(0, 1), specular power(0, 100)
+    # ===================================================================
+    # 3. MATERIAL PRESETS DROPDOWN COMPONENT INJECTION
+    # ===================================================================
+    preset_h_layout = QtWidgets.QHBoxLayout()
+    preset_label = QtWidgets.QLabel("Material Preset:")
+    preset_label.setFixedSize(120, 20)
+    preset_h_layout.addWidget(preset_label)
+    
+    parent.material_dropdown = QtWidgets.QComboBox()
+    parent.material_dropdown.addItems(["Custom", "Metal", "Sand", "Wood"])
+    parent.material_dropdown.currentTextChanged.connect(on_material_changed)
+    preset_h_layout.addWidget(parent.material_dropdown)
+    
+    spacer_lbl = QtWidgets.QLabel("")
+    spacer_lbl.setFixedSize(50, 20)
+    preset_h_layout.addWidget(spacer_lbl)
+    
+    layout.addLayout(preset_h_layout)
+
+    # --- Lighting Sliders Setup Loop ---
     lighting_dict = {   'ambient': [0, 100], 
                         'diffuse': [0, 100],
                         'specular': [0, 100],
                         'specular power': [0, 100]}
-    # vertical layout
-    lighting_layout = QtWidgets.QVBoxLayout()
     
+    lighting_layout = QtWidgets.QVBoxLayout()
     parent.lighting = {k : None for k in lighting_dict.keys()}
 
     for k, v in lighting_dict.items():
-        # horizontal layout
         h_layout = QtWidgets.QHBoxLayout()
-        # label
         c_label = QtWidgets.QLabel(k)
-        # size
         c_label.setFixedSize(120, 20)
         h_layout.addWidget(c_label)
-        # slider
+        
         slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         slider.setRange(v[0], v[1])
 
         label_text = ""
-        if k == 'ambient':
+        if k in ['ambient', 'diffuse']:
             slider.setValue(50)
             label_text = "50"
-        elif k == 'diffuse':
-            slider.setValue(50)
-            label_text = "50"
-        elif k == 'specular':
+        elif k in ['specular', 'specular power']:
             slider.setValue(100)
             label_text = "100"
-        elif k == 'specular power':
-            slider.setValue(100)
-            label_text = "100"
-        # label / numerical value corresponding to slider
+            
         slider_label = QtWidgets.QLabel(label_text)
         slider_label.setFixedSize(50, 20)
-        # connect slider to label
+        
+        # --- BIND INTERACTION SIGNALS SEQUENTIALLY ---
+        # 1. Sync numerical text label
         slider.valueChanged.connect(lambda value, label=slider_label: label.setText(str(value)))
+        # 2. Track custom override modifications
+        slider.valueChanged.connect(check_for_custom_override)
+        # 3. Stream adjustments directly back to shaders & graphics buffers
+        slider.valueChanged.connect(lambda value, prop_name=k: update_live_vtk_property(prop_name, value))
+        
         h_layout.addWidget(slider)
         h_layout.addWidget(slider_label)
-        # add to vertical layout
         lighting_layout.addLayout(h_layout)
         parent.lighting[k] = slider
 
     layout.addLayout(lighting_layout)
     layout.addWidget(get_HLine())
 
-    # ambient occlusion factor and kernel size input text
+    # --- Ambient Occlusion Block ---
     ao_dict = {'ambient occlusion factor' : 0, 'kernel size' : 128}
-    # vertical layout
     ao_layout = QtWidgets.QVBoxLayout()
     parent.ao = {k : None for k in ao_dict.keys()}
     for k, v in ao_dict.items():
-        # horizontal layout
         h_layout = QtWidgets.QHBoxLayout()
-        # label
         c_label = QtWidgets.QLabel(k)
-        # size
         c_label.setFixedSize(200, 20)
         h_layout.addWidget(c_label)
-        # input text
+        
         input_text = QtWidgets.QLineEdit()
         input_text.setFixedSize(50, 20)
         input_text.setText(str(v))
+        
         h_layout.addWidget(input_text)
-        # add to vertical layout
         ao_layout.addLayout(h_layout)
         parent.ao[k] = input_text
-
-    # TODO : wide and dark theme for query engine
 
     layout.addLayout(ao_layout)
     layout.addWidget(get_HLine())
@@ -387,7 +539,57 @@ class Configure(QtWidgets.QDialog):
         # stretch layout
         self.layout.setStretch(0, 2)
         self.layout.setStretch(1, 3)
+    def on_material_changed(material_name):
+        """Updates dictionary slider items simultaneously and forces a live VTK scene update."""
+        preset = MATERIAL_PRESETS.get(material_name)
+        if preset is None:
+            return  # Custom option clicked: leave values as-is
+            
+        parent._updating_from_preset = True
+        try:
+            # 1. Update visual slider handle positions in the UI panel
+            for key, value in preset.items():
+                if key in parent.lighting and parent.lighting[key] is not None:
+                    parent.lighting[key].setValue(value)
+            
+            # 2. Extract values converted back to VTK's 0.0 to 1.0 expected range
+            amb = preset["ambient"] / 100.0
+            dif = preset["diffuse"] / 100.0
+            spec = preset["specular"] / 100.0
+            spec_p = float(preset["specular power"])
 
+            # 3. Direct Pipeline Overhaul: push values directly into the active render pipeline
+            if hasattr(parent, 'ren') and parent.ren:
+                actor_collection = parent.ren.GetActors()
+                if actor_collection:
+                    actor_collection.InitTraversal()
+                    for _ in range(actor_collection.GetNumberOfItems()):
+                        actor = actor_collection.GetNextActor()
+                        if actor and hasattr(actor, 'GetProperty'):
+                            prop = actor.GetProperty()
+                            # Apply the fresh material preset weights directly to the shaders
+                            prop.SetAmbient(amb)
+                            prop.SetDiffuse(dif)
+                            prop.SetSpecular(spec)
+                            prop.SetSpecularPower(spec_p)
+                
+                # 4. Force a hard graphics buffer frame refresh pass
+                if hasattr(parent, 'iren') and parent.iren:
+                    parent.iren.GetRenderWindow().Render()
+                    
+        except Exception as e:
+            print(f"[Preset Error] Direct pipeline material assignment failed: {e}")
+        finally:
+            parent._updating_from_preset = False
+
+    def check_for_custom_override(self):
+        """Flips the dropdown selection to 'Custom' if the user manually drags a slider."""
+        if not getattr(self, '_updating_from_preset', False):
+            if hasattr(self, 'material_dropdown'):
+                # Block signals temporarily so setting 'Custom' doesn't alter values
+                self.material_dropdown.blockSignals(True)
+                self.material_dropdown.setCurrentText("Custom")
+                self.material_dropdown.blockSignals(False)
 
 def main(parent=None):
     '''

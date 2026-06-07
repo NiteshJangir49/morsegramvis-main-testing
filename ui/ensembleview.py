@@ -26,6 +26,11 @@ class EnsembleView(Window):
         self.light_factor = True
         self.ao_factor = True
 
+        self.current_ambient = 0.50       # 50% matching default UI display
+        self.current_diffuse = 0.50       # 50%
+        self.current_specular = 1.00      # 100%
+        self.current_specular_power = 100.0 # 100
+
         self.show_network_only = False
         self.network_graph_actor = None
 
@@ -166,10 +171,15 @@ class EnsembleView(Window):
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
 
-        actor.GetProperty().SetSpecularPower(Config.SPECULAR_POWER)
-        actor.GetProperty().SetSpecular(Config.SPECULAR)
-        actor.GetProperty().SetDiffuse(Config.DIFFUSE)
-        actor.GetProperty().SetAmbient(Config.AMBIENT)
+        # actor.GetProperty().SetSpecularPower(Config.SPECULAR_POWER)
+        # actor.GetProperty().SetSpecular(Config.SPECULAR)
+        # actor.GetProperty().SetDiffuse(Config.DIFFUSE)
+        # actor.GetProperty().SetAmbient(Config.AMBIENT)
+
+        actor.GetProperty().SetAmbient(self.current_ambient)
+        actor.GetProperty().SetDiffuse(self.current_diffuse)
+        actor.GetProperty().SetSpecular(self.current_specular)
+        actor.GetProperty().SetSpecularPower(self.current_specular_power)
 
         # set interpolation to phong
         utils.set_interpolation(actor)
@@ -423,13 +433,24 @@ class EnsembleView(Window):
         if hasattr(self, 'iren') and self.iren:
             self.iren.GetRenderWindow().Render()
 
-    def onToolbarSettingsAction(self, s):
-        """
-        Open the settings dialog.
-
-        @param s: status
-        """
-        settings_dialog.main(self)
+    def onToolbarSettingsAction(self):
+        """Opens the configuration panel and guarantees a direct reference connection."""
+        # Force 'self' (the EnsembleView window) into the get_form constructor
+        import ui.configure as configure # Adjust import path to match your layout
+        
+        # If your code creates a separate dialog box or dock widget:
+        if not hasattr(self, 'settings_dialog') or self.settings_dialog is None:
+            from PySide6 import QtWidgets
+            self.settings_dialog = QtWidgets.QDialog(self)
+            self.settings_dialog.setWindowTitle("Lighting & Folder Configurations")
+            
+            # Call get_form passing 'self' explicitly as the parent reference!
+            form_widget = configure.get_form(parent=self)
+            
+            dialog_layout = QtWidgets.QVBoxLayout(self.settings_dialog)
+            dialog_layout.addWidget(form_widget)
+            
+        self.settings_dialog.show()
 
     def onInteractionModeCheckbox(self, state):
         """

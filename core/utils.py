@@ -6,6 +6,7 @@ import shutil
 import trimesh
 import point_cloud_utils as pcu
 from settings import Config
+import xml.etree.ElementTree as ET
 
 @dataclass
 class ContactPoint:
@@ -25,6 +26,64 @@ class ViewType:
     SINGLE = 0
     NEIGHBOR = 1
 
+def get_vtk_cmap_from_xml(name, data_min=0.0, data_max=1.0):
+    """
+    Parses a ParaView-compatible XML colormap file from the colormap/ folder.
+    Maps the normalized [0.0, 1.0] point values cleanly across the actual 
+    dataset range (data_min to data_max).
+    """
+    # Resolve path to the colormap directory relative to this utils file
+    base_path = os.path.dirname(os.path.dirname(__file__))
+    xml_path = os.path.join(base_path, 'colormap', f"{name}.xml")
+    
+    # We use vtkColorTransferFunction because it smoothly interpolates RGB points
+    ctf = vtk.vtkColorTransferFunction()
+    
+    # Fallback mechanism: If the file is missing, build a high-visibility Blue -> Red scale
+    if not os.path.exists(xml_path):
+        print(f"[Colormap Engine] Warning: {xml_path} not found. Using default fallback.")
+        ctf.SetColorSpaceToRGB()
+        ctf.AddRGBPoint(data_min, 0.0, 0.0, 1.0) # Pure Blue at Min
+        ctf.AddRGBPoint(data_max, 1.0, 0.0, 0.0) # Pure Red at Max
+        return ctf
+
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        
+        cmap_node = root.find('.//ColorMap')
+        if cmap_node is not None:
+            # Configure the target color interpolation space
+            space = cmap_node.get('space', 'RGB').upper()
+            if 'LAB' in space or 'CIELAB' in space:
+                ctf.SetColorSpaceToLab()
+            elif 'HSV' in space:
+                ctf.SetColorSpaceToHSV()
+            else:
+                ctf.SetColorSpaceToRGB()
+            
+            # Process every control point gradient node
+            points = cmap_node.findall('Point')
+            if points:
+                for pt in points:
+                    x_norm = float(pt.get('x'))
+                    r = float(pt.get('r'))
+                    g = float(pt.get('g'))
+                    b = float(pt.get('b'))
+                    
+                    # Transform normalized coordinate [0.0, 1.0] to your true data range
+                    x_real = data_min + x_norm * (data_max - data_min)
+                    ctf.AddRGBPoint(x_real, r, g, b)
+                return ctf
+
+    except Exception as e:
+        print(f"[Colormap Engine] Error parsing {name}.xml: {e}")
+
+    # Ultimate defensive fallback safely preventing pipeline crashes
+    ctf.SetColorSpaceToRGB()
+    ctf.AddRGBPoint(data_min, 0.0, 0.0, 1.0)
+    ctf.AddRGBPoint(data_max, 1.0, 0.0, 0.0)
+    return ctf
 
 def read_file(filename, progress_handler=None):
     """

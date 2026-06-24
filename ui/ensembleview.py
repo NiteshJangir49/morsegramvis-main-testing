@@ -145,11 +145,35 @@ class EnsembleView(Window):
         # LOCAL DROPDOWN ACTION CALLBACK CLOSURES
         # ===================================================================
         def on_visualization_property_changed(property_name):
+            """
+            Handles incoming PySide string selection updates cleanly.
+            Locks down colormaps when looking at default particle IDs.
+            """
+            if not hasattr(self, 'cmap_cb') or self.cmap_cb is None:
+                return
+
             print(f"[UI Context] Active property shifted to: {property_name}")
-            idx = self.cmap_cb.currentIndex()
-            current_cmap = self.cmap_cb.itemData(idx, QtCore.Qt.UserRole)
-            if hasattr(self, 'apply_colormap_to_grains') and current_cmap:
-                self.apply_colormap_to_grains(current_cmap)
+            
+            # Change "Default" check to "Particle ID"
+            if property_name == "Particle ID":
+                # 1. HARD LOCK: Make the colormap dropdown completely inaccessible
+                self.cmap_cb.setEnabled(False)
+                
+                # 2. Force the 3D pipeline to render raw geometry particle IDs
+                if hasattr(self, 'apply_colormap_to_grains'):
+                    self.apply_colormap_to_grains("default")
+            else:
+                # 3. UNLOCK: Re-enable dropdown interaction for numerical data arrays
+                self.cmap_cb.setEnabled(True)
+                
+                idx = self.cmap_cb.currentIndex()
+                current_cmap = self.cmap_cb.itemData(idx, QtCore.Qt.UserRole)
+                
+                if not current_cmap:
+                    current_cmap = self.get_available_colormaps()[0] if hasattr(self, 'get_available_colormaps') else "viridis"
+                
+                if hasattr(self, 'apply_colormap_to_grains'):
+                    self.apply_colormap_to_grains(current_cmap)
 
         def on_colormap_selection_changed(index):
             """Fires using the row index to safely parse hidden metadata keys."""
@@ -176,8 +200,13 @@ class EnsembleView(Window):
         # 1. Property Dropdown (Locked to Coordination Number)
         toolbar.addWidget(QtWidgets.QLabel(" Property: "))
         self.prop_cb = QtWidgets.QComboBox()
-        self.prop_cb.addItems(["Coordination Number"])
+        self.prop_cb.clear()
+        self.prop_cb.addItems(["Particle ID", "Coordination Number"])
         self.prop_cb.currentTextChanged.connect(on_visualization_property_changed)
+        if hasattr(self, 'prop_cb') and hasattr(self, 'cmap_cb'):
+            if self.prop_cb.currentText() == "Default":
+                self.cmap_cb.setEnabled(False)
+                print("[UI Startup] Safely greyed out colormap selection for initial 'Default' view.")
         toolbar.addWidget(self.prop_cb)
 
         toolbar.addSeparator()
@@ -217,6 +246,10 @@ class EnsembleView(Window):
         import pandas as pd
         import numpy as np
         import os
+
+        prop_box = getattr(self, 'prop_cb', getattr(self, 'property_cb', None))
+        if prop_box and prop_box.currentText() == "Particle ID":
+            return None, "Particle ID", 0, 0
         
         try:
             from config import Config
@@ -446,33 +479,48 @@ class EnsembleView(Window):
         return sorted(colormap_list)
 
     def populate_cmap_dropdown_with_icons(self):
-        """Loads PNG previews from the colormap folder and pairs them as icons with hidden text names."""
+        """Loads PNG previews from the colormap folder and pairs them as icons safely."""
         import os
         from PySide6.QtGui import QIcon, QPixmap
+        from PySide6 import QtCore
         
-        self.cmap_cb.clear()
-        
-        # 1. INJECT THE DEFAULT OPTION AS THE FIRST ROW ENTRY
-        # We pass "Default" as the visible text so it stands out cleanly against the textless icons.
-        self.cmap_cb.addItem("Default", "default")
-        
-        base_dir = os.path.dirname(os.path.dirname(__file__))
-        colormap_dir = os.path.join(base_dir, 'colormap')
-        available_maps = self.get_available_colormaps()
-        
-        icon_size = QtCore.QSize(100, 18)
-        self.cmap_cb.setIconSize(icon_size)
-        
-        for name in available_maps:
-            png_path = os.path.join(colormap_dir, f"{name}.png")
-            if os.path.exists(png_path):
-                pixmap = QPixmap(png_path)
-                scaled_pixmap = pixmap.scaled(icon_size, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.SmoothTransformation)
-                icon = QIcon(scaled_pixmap)
-                # Text is empty string for colormaps, name string stored in UserRole
-                self.cmap_cb.addItem(icon, "", name)
-            else:
-                self.cmap_cb.addItem(name)
+        cb_element = getattr(self, 'cmap_cb', getattr(self, 'colormap_cb', None))
+        if cb_element is None:
+            return
+
+        cb_element.blockSignals(True)
+        try:
+            cb_element.clear()
+            
+            base_dir = os.path.dirname(os.path.dirname(__file__))
+            colormap_dir = os.path.join(base_dir, 'colormap')
+            available_maps = self.get_available_colormaps()
+            
+            icon_size = QtCore.QSize(100, 18)
+            cb_element.setIconSize(icon_size)
+            
+            for name in available_maps:
+                png_path = os.path.join(colormap_dir, f"{name}.png")
+                if os.path.exists(png_path):
+                    pixmap = QPixmap(png_path)
+                    scaled_pixmap = pixmap.scaled(icon_size, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.SmoothTransformation)
+                    icon = QIcon(scaled_pixmap)
+                    cb_element.addItem(icon, "", name)
+                else:
+                    cb_element.addItem(name)
+                    
+        finally:
+            cb_element.blockSignals(False)
+            
+            # ===================================================================
+            # THE PERMANENT STARTUP FIX:
+            # Enforce property rules right after the dropdown items are built!
+            # ===================================================================
+            prop_box = getattr(self, 'prop_cb', getattr(self, 'property_cb', None))
+            if prop_box and prop_box.currentText() == "Particle ID":
+                cb_element.setEnabled(False)
+                print("[UI Engine] Enforced lockdown: Colormap dropdown disabled for 'Default' configuration.")
+            # ===================================================================
 
     def setup_native_vtk_legend(self):
         """Initializes native VTK 2D overlay text and a rotated colormap strip on the left edge."""

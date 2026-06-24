@@ -169,24 +169,79 @@ def get_form(parent=None):
                 parent.material_dropdown.blockSignals(False)
 
     def on_material_changed(material_name):
-        """Processes preset choices, moves slider positions, and forces a scene redraw."""
+        """
+        Updates lighting slider positions and mesh properties by targeting 
+        the active view window and isolating its property state block.
+        """
         preset = MATERIAL_PRESETS.get(material_name)
-        if preset is None: 
-            return  # Custom chosen: leave parameters as-is
+        if preset is None:
+            return  # Custom option clicked: leave values as-is
+        
+        # 1. DYNAMIC ACTIVE WINDOW LOOKUP
+        from PySide6.QtWidgets import QApplication
+        active_view = None
+        for widget in QApplication.topLevelWidgets():
+            if widget.__class__.__name__ == 'EnsembleView' and widget.isVisible():
+                active_view = widget
+                break
             
-        parent._updating_from_preset = True
-        try:
-            # Shift the UI handles programmatically
-            for key, value in preset.items():
-                if key in parent.lighting and parent.lighting[key] is not None:
-                    parent.lighting[key].setValue(value)
-                    sync_background_config_state(key, value)
-            
-            # Fire a direct scene update sweep
-            update_live_vtk_property('refresh', 0)
-        finally:
-            parent._updating_from_preset = False
+        if active_view is None:
+            print("[Preset Engine] Aborted: No active visible EnsembleView found.")
+            return
 
+        active_view._updating_from_preset = True
+        try:
+            # 2. UPDATE VISUAL SLIDERS ON ACTIVE VIEW (WITH SIGNALS MUTED)
+            if hasattr(active_view, 'lighting') and active_view.lighting:
+                for key, value in preset.items():
+                    if key in active_view.lighting and active_view.lighting[key] is not None:
+                        slider = active_view.lighting[key]
+                        slider.blockSignals(True)
+                        slider.setValue(int(value))
+                        slider.blockSignals(False)
+        
+            # 3. CONVERT PRESET VALUES TO VTK FLOATS
+            amb = preset["ambient"] / 100.0
+            dif = preset["diffuse"] / 100.0
+            spec = preset["specular"] / 100.0
+            spec_p = float(preset["specular power"])
+
+            # 4. ISOLATE ACTOR MEMORY AND APPLY LIGHTING COEFFICIENTS
+            if hasattr(active_view, 'active_ensemble_actor') and active_view.active_ensemble_actor:
+                actor = active_view.active_ensemble_actor
+            
+                # --- CRITICAL FIX: FORCIBLY ISOLATE THE PROPERTY REGION ---
+                import vtk
+                current_prop = actor.GetProperty()
+            
+                # Create a brand new independent property instance container
+                isolated_prop = vtk.vtkProperty()
+                if current_prop:
+                    # Deep copy the existing attributes (color, visibility) so nothing is lost
+                    isolated_prop.DeepCopy(current_prop)
+                
+                # Assign the clean isolated block back to the active mesh actor
+                actor.SetProperty(isolated_prop)
+                # ----------------------------------------------------------
+
+                # Apply the fresh material presets directly to the new safe container
+                isolated_prop.SetAmbient(amb)
+                isolated_prop.SetDiffuse(dif)
+                isolated_prop.SetSpecular(spec)
+                isolated_prop.SetSpecularPower(spec_p)
+            
+                print(f"[Preset Engine] Isolated material state updated for window: {id(active_view)}")
+            
+                # 5. FORCE REFRESH PASS ON THE LIVE CONTEXT ONLY
+                if hasattr(active_view, 'iren') and active_view.iren:
+                    render_win = active_view.iren.GetRenderWindow()
+                    if render_win and active_view.isVisible():
+                        render_win.Render()
+                    
+        except Exception as e:
+            print(f"[Preset Error] Material assignment loop failed: {e}")
+        finally:
+            active_view._updating_from_preset = False
     # ===================================================================
     # 2. STANDALONE UI LAYOUT & WIDGET ASSEMBLY
     # ===================================================================
@@ -207,10 +262,42 @@ def get_form(parent=None):
     layout.addLayout(folder_layout)
     layout.addWidget(get_HLine())
 
-    # --- RGB Sliders Block ---
+    # --- RGB Sliders Block (Background Color Configuration) ---
     rgb_layout = QtWidgets.QVBoxLayout()
     parent.rgb = {'red' : None, 'green' : None, 'blue' : None}
-    for c in parent.rgb.keys():
+    
+    def update_vtk_background_color(*args):
+        """Safely updates the 3D viewport canvas background color without context crashes."""
+        # 1. Look up the true active window running on screen to prevent zombie context rendering
+        from PySide6.QtWidgets import QApplication
+        active_view = None
+        for widget in QApplication.topLevelWidgets():
+            if widget.__class__.__name__ == 'EnsembleView' and widget.isVisible():
+                active_view = widget
+                break
+        
+        if active_view is None:
+            active_view = parent # Fallback if initializing
+
+        # 2. Extract 0-255 inputs and normalize to VTK's 0.0 - 1.0 floats
+        r = (parent.rgb['red'].value() if parent.rgb['red'] else 0) / 255.0
+        g = (parent.rgb['green'].value() if parent.rgb['green'] else 0) / 255.0
+        b = (parent.rgb['blue'].value() if parent.rgb['blue'] else 0) / 255.0
+        
+        try:
+            # 3. Apply directly to the active renderer's background channel
+            if hasattr(active_view, 'ren') and active_view.ren:
+                active_view.ren.SetBackground(r, g, b)
+                
+            # 4. Safely trigger a hardware refresh pass on the live context only
+            if hasattr(active_view, 'iren') and active_view.iren:
+                rw = active_view.iren.GetRenderWindow()
+                if rw and active_view.isVisible():
+                    rw.Render()
+        except Exception as e:
+            print(f"[Background Engine] Dropped call to prevent crash: {e}")
+
+    for c in list(parent.rgb.keys()):
         h_layout = QtWidgets.QHBoxLayout()
         c_label = QtWidgets.QLabel(c)
         c_label.setFixedSize(50, 20)
@@ -218,10 +305,13 @@ def get_form(parent=None):
         
         slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         slider.setRange(0, 255)
+        slider.setValue(0) # Default to 0 (Black background setup)
         
-        slider_label = QtWidgets.QLabel("0")
+        slider_label = QtWidgets.QLabel(str(slider.value()))
         slider_label.setFixedSize(50, 20)
-        slider.valueChanged.connect(lambda value, label=slider_label: label.setText(str(value)))
+        
+        slider.valueChanged.connect(lambda val, lbl=slider_label: lbl.setText(str(val)))
+        slider.valueChanged.connect(update_vtk_background_color)
         
         h_layout.addWidget(slider)
         h_layout.addWidget(slider_label)
@@ -539,48 +629,66 @@ class Configure(QtWidgets.QDialog):
         # stretch layout
         self.layout.setStretch(0, 2)
         self.layout.setStretch(1, 3)
+
     def on_material_changed(material_name):
-        """Updates dictionary slider items simultaneously and forces a live VTK scene update."""
+        """
+        Updates lighting slider handle positions and mesh actor properties 
+        by targeting the true active screen subwindow dynamically.
+        """
         preset = MATERIAL_PRESETS.get(material_name)
         if preset is None:
             return  # Custom option clicked: leave values as-is
+        
+        # 1. DYNAMIC ACTIVE WINDOW LOOKUP
+        from PySide6.QtWidgets import QApplication
+        active_view = None
+        for widget in QApplication.topLevelWidgets():
+            if widget.__class__.__name__ == 'EnsembleView' and widget.isVisible():
+                active_view = widget
+                break
             
-        parent._updating_from_preset = True
+        if active_view is None:
+            print("[Preset Engine] Aborted: No active visible EnsembleView subwindow found.")
+            return
+
+        active_view._updating_from_preset = True
         try:
-            # 1. Update visual slider handle positions in the UI panel
-            for key, value in preset.items():
-                if key in parent.lighting and parent.lighting[key] is not None:
-                    parent.lighting[key].setValue(value)
-            
-            # 2. Extract values converted back to VTK's 0.0 to 1.0 expected range
+            # 2. UPDATE VISUAL SLIDER HANDLES ON THE LIVE ACTIVE INSTANCE ONLY
+            # This breaks the closure loop trap causing the second-run crash!
+            if hasattr(active_view, 'lighting') and active_view.lighting:
+                for key, value in preset.items():
+                    if key in active_view.lighting and active_view.lighting[key] is not None:
+                        # Temporarily mute individual slider signals to prevent cascaded render passes
+                        active_view.lighting[key].blockSignals(True)
+                        active_view.lighting[key].setValue(value)
+                        active_view.lighting[key].blockSignals(False)
+        
+            # 3. EXTRACT AND NORMALIZE LIGHTING COEFFICIENTS
             amb = preset["ambient"] / 100.0
             dif = preset["diffuse"] / 100.0
             spec = preset["specular"] / 100.0
             spec_p = float(preset["specular power"])
 
-            # 3. Direct Pipeline Overhaul: push values directly into the active render pipeline
-            if hasattr(parent, 'ren') and parent.ren:
-                actor_collection = parent.ren.GetActors()
-                if actor_collection:
-                    actor_collection.InitTraversal()
-                    for _ in range(actor_collection.GetNumberOfItems()):
-                        actor = actor_collection.GetNextActor()
-                        if actor and hasattr(actor, 'GetProperty'):
-                            prop = actor.GetProperty()
-                            # Apply the fresh material preset weights directly to the shaders
-                            prop.SetAmbient(amb)
-                            prop.SetDiffuse(dif)
-                            prop.SetSpecular(spec)
-                            prop.SetSpecularPower(spec_p)
-                
-                # 4. Force a hard graphics buffer frame refresh pass
-                if hasattr(parent, 'iren') and parent.iren:
-                    parent.iren.GetRenderWindow().Render()
+            # 4. DIRECT PIPELINE ASSIGNMENT ON ACTIVE MESH ACTOR
+            if hasattr(active_view, 'active_ensemble_actor') and active_view.active_ensemble_actor:
+                prop = active_view.active_ensemble_actor.GetProperty()
+                if prop:
+                    prop.SetAmbient(amb)
+                    prop.SetDiffuse(dif)
+                    prop.SetSpecular(spec)
+                    prop.SetSpecularPower(spec_p)
+                    print(f"[Preset Engine] Successfully synchronized lighting on active window: {id(active_view)}")
+            
+                # 5. FORCE A HARD REFRESH ON THE STABLE WINDOW CANVAS ONLY
+                if hasattr(active_view, 'iren') and active_view.iren:
+                    render_win = active_view.iren.GetRenderWindow()
+                    if render_win and active_view.isVisible():
+                        render_win.Render()
                     
         except Exception as e:
-            print(f"[Preset Error] Direct pipeline material assignment failed: {e}")
+            print(f"[Preset Error] Direct material assignment loop failed: {e}")
         finally:
-            parent._updating_from_preset = False
+            active_view._updating_from_preset = False
 
     def check_for_custom_override(self):
         """Flips the dropdown selection to 'Custom' if the user manually drags a slider."""

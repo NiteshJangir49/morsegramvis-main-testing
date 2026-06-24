@@ -271,27 +271,48 @@ class EnsembleView(Window):
 
     def apply_colormap_to_grains(self, colormap_name):
         """
-        Maps chosen property arrays dynamically to the VTK polydata cells,
-        or completely disables scalar tracking if 'Default' is selected.
+        Maps chosen property arrays dynamically to the VTK polydata cells.
+        Defensively tracks active top-level widgets to prevent zombie rendering context loops.
         """
+        # ===================================================================
+        # STRUCTURAL HARDWARE LOOKUP: Discover the true live window instance
+        # ===================================================================
+        from PySide6.QtWidgets import QApplication
+        active_view = None
+        for widget in QApplication.topLevelWidgets():
+            if widget.__class__.__name__ == 'EnsembleView' and widget.isVisible():
+                active_view = widget
+                break
+        
+        if active_view is None:
+            active_view = self  # Fallback to current context layer if initializing
+
+        # If the window isn't officially mapped or exposed on screen by the OS yet, drop the render.
+        if not hasattr(active_view, 'isVisible') or not active_view.isVisible():
+            print("[Data Pipeline] Aborted render pass: Window context is not yet visible.")
+            return
+
         # import vtk
         # import pandas as pd
         # import numpy as np
         # import ui.utils as utils
         
-        if not hasattr(self, 'active_ensemble_actor') or not self.active_ensemble_actor:
+        if not hasattr(active_view, 'active_ensemble_actor') or not active_view.active_ensemble_actor:
+            print("[Data Pipeline] Aborted render pass: Active mesh actor is missing.")
             return
 
-        mapper = self.active_ensemble_actor.GetMapper()
+        mapper = active_view.active_ensemble_actor.GetMapper()
+        if not mapper:
+            return
 
         # ===================================================================
         # OPTION BYPASS: HANDLER FOR DEFAULT UNIFORM MESH COLORING
         # ===================================================================
         if colormap_name == "Default" or colormap_name == "default":
             print("[Data Pipeline] Reverting actor rendering context back to original uniform color.")
-            mapper.ScalarVisibilityOff() # Turn off the colormap engine scalars pass
+            mapper.ScalarVisibilityOff()  # Turn off the colormap engine scalars pass
             
-            # Restore original material tracking colors
+            # Restore original material tracking colors if they exist in polydata
             polydata = mapper.GetInput()
             if polydata and polydata.GetPointData().GetArray('Color'):
                 mapper.SelectColorArray('Color')
@@ -300,36 +321,48 @@ class EnsembleView(Window):
                 print("[Data Pipeline] Restored original embedded mesh point colors.")
             else:
                 # Fallback: Assign a clean gray material tint if native colors are unassigned
-                actor_prop = self.active_ensemble_actor.GetProperty()
-                actor_prop.SetColor(0.65, 0.67, 0.70) 
-                actor_prop.SetAmbient(0.15)
-                actor_prop.SetDiffuse(0.75)
-                actor_prop.SetSpecular(0.2)
+                actor_prop = active_view.active_ensemble_actor.GetProperty()
+                if actor_prop:
+                    actor_prop.SetColor(0.65, 0.67, 0.70) 
+                    actor_prop.SetAmbient(0.15)
+                    actor_prop.SetDiffuse(0.75)
+                    actor_prop.SetSpecular(0.2)
             
             # Hide the vertical 2D PNG strip legend actors inside your 3D canvas
-            if hasattr(self, 'legend_strip_actor'): self.legend_strip_actor.VisibilityOff()
-            if hasattr(self, 'vtk_max_actor'): self.vtk_max_actor.VisibilityOff()
-            if hasattr(self, 'vtk_min_actor'): self.vtk_min_actor.VisibilityOff()
+            if hasattr(active_view, 'legend_strip_actor') and active_view.legend_strip_actor: 
+                active_view.legend_strip_actor.VisibilityOff()
+            if hasattr(active_view, 'vtk_max_actor') and active_view.vtk_max_actor: 
+                active_view.vtk_max_actor.VisibilityOff()
+            if hasattr(active_view, 'vtk_min_actor') and active_view.vtk_min_actor: 
+                active_view.vtk_min_actor.VisibilityOff()
             
-            # Force a clean redraw refresh pass
-            if hasattr(self, 'iren') and self.iren: 
-                self.iren.GetRenderWindow().Render()
+            # Force a hardware paint frame refresh pass on the active canvas securely
+            if hasattr(active_view, 'iren') and active_view.iren is not None:
+                render_win = active_view.iren.GetRenderWindow()
+                if render_win is not None and active_view.isVisible():
+                    try:
+                        render_win.Render()
+                        print("[Data Pipeline] Safe default uniform render pass completed successfully.")
+                    except Exception as e:
+                        print(f"[Data Pipeline] Refused default rendering on detached context: {e}")
             return
         # ===================================================================
 
-        # 1. Fetch our dynamic data arrays and matching column identity keys
-        scalar_series, column_header, d_min, d_max = self.load_property_scalars()
-        if scalar_series is None:
+        # 1. Fetch scalar series arrays from data layer
+        scalar_series, column_header, d_min, d_max = active_view.load_property_scalars()
+        if scalar_series is None: 
+            print("[Data Pipeline] Aborted render pass: Property scalars could not be loaded.")
             return
 
-        # Ensure text indicators are visible since we are applying a colormap pass
-        if hasattr(self, 'vtk_max_actor'): self.vtk_max_actor.VisibilityOn()
-        if hasattr(self, 'vtk_min_actor'): self.vtk_min_actor.VisibilityOn()
+        # Make overlay text labels active for the color scale
+        if hasattr(active_view, 'vtk_max_actor') and active_view.vtk_max_actor: 
+            active_view.vtk_max_actor.VisibilityOn()
+        if hasattr(active_view, 'vtk_min_actor') and active_view.vtk_min_actor: 
+            active_view.vtk_min_actor.VisibilityOn()
 
-        # 2. Fetch our continuous XML color transfer function from Phase 1
+        # Build LookUp Table color transfer mapping structure from XML definitions
         ctf = utils.get_vtk_cmap_from_xml(colormap_name, data_min=d_min, data_max=d_max)
         
-        # 3. Build lookup dictionary map using our discovered 'cp_id' column
         df = scalar_series.to_frame()
         try:
             from config import Config
@@ -353,7 +386,7 @@ class EnsembleView(Window):
         if not id_array: 
             id_array = polydata.GetPointData().GetArray('CP ID')
 
-        # 4. Construct and populate our destination VTK scalar vector array
+        # Generate a clean scalar container layer array
         vtk_scalars = vtk.vtkFloatArray()
         vtk_scalars.SetName("ActivePropertyScalars")
         vtk_scalars.SetNumberOfValues(num_cells)
@@ -369,17 +402,12 @@ class EnsembleView(Window):
                     val = float(d_min)
             else:
                 val = float(scalar_series.iloc[i]) if i < len(scalar_series) else float(d_min)
-            
             vtk_scalars.SetValue(i, val)
 
-        print(f"[Data Pipeline] Aligned and matched {matched_count}/{num_cells} cells using 'cp_id' column.")
-
-        # 5. Connect the array back to the cell data layers
         cell_data.SetScalars(vtk_scalars)
         cell_data.SetActiveScalars("ActivePropertyScalars")
 
-        # 6. FORCE FLUSH PARAMETERS AND RESET SCALAR MODE TO CELL DATA
-        # This explicitly overrides point-layer locks from the Default option switch!
+        # Map pipeline attributes to shaders
         mapper.SetScalarModeToUseCellData()
         mapper.SetLookupTable(ctf)
         mapper.SetScalarRange(d_min, d_max)
@@ -387,15 +415,22 @@ class EnsembleView(Window):
         mapper.ScalarVisibilityOn()
         mapper.InterpolateScalarsBeforeMappingOn()
         
-        # 7. Update the vertical 3D canvas viewport PNG legend texture strip
-        self.update_native_vtk_legend_image(colormap_name)
+        # Draw the 2D side banner layout legend matching our colormap configuration
+        if hasattr(active_view, 'update_native_vtk_legend_image'):
+            active_view.update_native_vtk_legend_image(colormap_name)
 
-        # 8. Trigger an immediate canvas draw refresh pass
-        self.active_ensemble_actor.Modified()
-        if hasattr(self, 'iren') and self.iren:
-            self.iren.GetRenderWindow().Render()
-        
-        print(f"[Data Pipeline] Dynamic recolor complete. Rendered metric: '{column_header}' across cells.")
+        # ===================================================================
+        # CRITICAL SAFETY CHECK BEFORE TRIGGERING OPENGL DRAW OPERATIONS
+        # ===================================================================
+        if hasattr(active_view, 'iren') and active_view.iren is not None:
+            render_win = active_view.iren.GetRenderWindow()
+            if render_win is not None and active_view.isVisible():
+                try:
+                    active_view.active_ensemble_actor.Modified()
+                    render_win.Render()
+                    print(f"[Data Pipeline] Dynamic recolor complete. Rendered metric: '{column_header}' across cells.")
+                except Exception as e:
+                    print(f"[Data Pipeline] Aborted paint loop pass to protect closing Win32 context handle: {e}")
 
     def get_available_colormaps(self):
         """Scans the colormap/ folder and returns a list of clean XML map names."""

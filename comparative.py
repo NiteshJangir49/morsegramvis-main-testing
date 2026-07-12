@@ -3,9 +3,8 @@ import ast
 import numpy as np
 import pandas as pd
 import sys
-import xml.etree.ElementTree as ET
 
-from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QSlider
 from PySide6.QtCore import Qt
 import vtkmodules.all as vtk
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
@@ -68,7 +67,6 @@ def compute_network_data(particles_csv, contact_vtp):
     num_edges = len(edge_list)
     print(f"[Data Pipeline] Extracted {num_edges} total network edge pairs.")
     
-    # MATCHES GENERATOR EXPORTER: Force only ~5% of edges to contain distinct delta differences
     np.random.seed(42)
     different_mask = np.random.rand(num_edges) < 0.05 
 
@@ -81,12 +79,10 @@ def compute_network_data(particles_csv, contact_vtp):
         base_weight = 75.0 / distance
 
         if not different_mask[i]:
-            # ~95% of edges get identical noise coefficients
             shared_noise = np.random.uniform(0.90, 1.10)
             weights_A[i] = base_weight * shared_noise
             weights_B[i] = base_weight * shared_noise
         else:
-            # ~5% of edges diverge realistically
             weights_A[i] = base_weight * np.random.uniform(0.85, 1.15)
             weights_B[i] = base_weight * np.random.uniform(0.85, 1.15)
 
@@ -94,51 +90,13 @@ def compute_network_data(particles_csv, contact_vtp):
     return points, edge_list, diff_weights
 
 # ===================================================================
-# 2. DYNAMIC LOOKUP PARSING UTILITY
-# ===================================================================
-def parse_xml_colormap(xml_path):
-    if not os.path.exists(xml_path):
-        print(f"[Warning] Colormap XML not found at {xml_path}. Falling back to default grading.")
-        return None
-
-    try:
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-        
-        cmap_node = root.find(".//ColorMap") if root.tag != "ColorMap" else root
-        if cmap_node is None:
-            print("[Error] No <ColorMap> tag found in XML structure.")
-            return None
-
-        control_points = []
-        for point in cmap_node.findall("Point"):
-            x = float(point.get("x"))
-            r = float(point.get("r"))
-            g = float(point.get("g"))
-            b = float(point.get("b"))
-            control_points.append((x, r, g, b))
-            
-        control_points.sort(key=lambda p: p[0])
-        return control_points
-    except Exception as e:
-        print(f"[Error Parsing XML Colormap File]: {e}")
-        return None
-
-# ===================================================================
-# 3. INTERFACE LAYER WITH FLIPPED LEGEND SIDEBAR & VALUE ANCHORS
+# 2. INTERFACE LAYER WITH DROPDOWN MODE SWITCHING & SLIDER FILTER
 # ===================================================================
 class ComparativeViewer(QMainWindow):
     def __init__(self, points, edge_list, diff_weights):
         super().__init__()
-        self.setWindowTitle("Steel Beads Contact Networks - 5% Delta View")
-        self.setGeometry(100, 100, 1200, 800)
-
-        # ----------------------------------------------------------------
-        # SPECIFIED PATHS
-        # ----------------------------------------------------------------
-        colormap_xml_path = r"colormap\blue-orange-div.xml"  
-        colormap_png_path = r"colormap\blue-orange-div.png"
-        # ----------------------------------------------------------------
+        self.setWindowTitle("DiffSeer view")
+        self.setGeometry(100, 100, 1300, 850)
 
         self.points = points
         self.edge_list = edge_list
@@ -147,152 +105,129 @@ class ComparativeViewer(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
+        # Build Clean Dropdown & Slider Control Panel
         control_layout = QHBoxLayout()
-        control_layout.addWidget(QLabel(f"<b>Active Colormap:</b> {os.path.basename(colormap_xml_path)} | <i>Showing ~5% Network Variations</i>"))
+        control_layout.addWidget(QLabel("<b>Visualization Mode:</b>"))
+        
+        self.mode_dropdown = QComboBox()
+        self.mode_dropdown.addItems([
+            "Difference View",
+            "Identical Edges",
+            "Combined View"
+        ])
+        self.mode_dropdown.currentIndexChanged.connect(self.handle_mode_switch)
+        control_layout.addWidget(self.mode_dropdown)
+        
+        control_layout.addSpacing(30)
+        
+        # Add Thresholding Filter Slider
+        self.slider_label = QLabel("<b>Threshold value: 0.00</b>")
+        control_layout.addWidget(self.slider_label)
+        
+        self.filter_slider = QSlider(Qt.Horizontal)
+        self.filter_slider.setMinimum(0)
+        self.filter_slider.setMaximum(100)
+        self.filter_slider.setValue(0)
+        self.filter_slider.setFixedWidth(200)
+        self.filter_slider.valueChanged.connect(self.handle_slider_filter)
+        control_layout.addWidget(self.filter_slider)
+        
         control_layout.addStretch()
         main_layout.addLayout(control_layout)
 
         self.vtkWidget = QVTKRenderWindowInteractor(self)
         main_layout.addWidget(self.vtkWidget)
 
-        # Build clean raw geometric line data structure arrays
-        polydata = vtk.vtkPolyData()
-        polydata.SetPoints(points)
-        
-        lines = vtk.vtkCellArray()
-        scalars = vtk.vtkFloatArray()
-        scalars.SetName("DifferenceScalars")
+        self.renderer = vtk.vtkRenderer()
+        self.renderer.SetBackground(0.08, 0.09, 0.1)
 
-        visible_edges_count = 0
-        for i, edge in enumerate(self.edge_list):
-            val = diff_weights[i]
+        # Normalization Step (-1 to 1 range)
+        max_val = max(abs(diff_weights.min()), abs(diff_weights.max())) if len(diff_weights) else 1.0
+        if max_val == 0: max_val = 1e-4
+        self.normalized_diffs = diff_weights / max_val 
+
+        # Width specification targets
+        min_line_width = 0.1  
+        max_line_width = 4.0 
+
+        identical_cells = vtk.vtkCellArray()
+        
+        # Parallel lists to link actors with their respective magnitude metadata
+        self.varied_actors = []
+        self.varied_magnitudes = []
+        
+        varied_count = 0
+        identical_count = 0
+
+        for i, edge in enumerate(edge_list):
+            norm_val = self.normalized_diffs[i]
             
-            # STRICT FILTER: Exclude edge entirely if the difference is exactly 0
-            if abs(val) < 1e-7: 
+            # Check for static structural matches
+            if abs(norm_val) < 1e-6:
+                line = vtk.vtkLine()
+                line.GetPointIds().SetId(0, edge[0])
+                line.GetPointIds().SetId(1, edge[1])
+                identical_cells.InsertNextCell(line)
+                identical_count += 1
                 continue
-                
+
+            magnitude = abs(norm_val)
+            fractional_width = min_line_width + (magnitude * (max_line_width - min_line_width))
+
             line = vtk.vtkLine()
             line.GetPointIds().SetId(0, edge[0])
             line.GetPointIds().SetId(1, edge[1])
-            lines.InsertNextCell(line)
-            scalars.InsertNextValue(val)
-            visible_edges_count += 1
             
-        polydata.SetLines(lines)
-        polydata.GetCellData().SetScalars(scalars)
-        print(f"[Render Pipeline] Rendering {visible_edges_count} mutated force links.")
+            single_cell_array = vtk.vtkCellArray()
+            single_cell_array.InsertNextCell(line)
 
-        # Build lookup table dynamically from target file path
-        lut_xml = vtk.vtkLookupTable()
-        lut_xml.SetNumberOfTableValues(256)
-        lut_xml.Build()
+            polydata = vtk.vtkPolyData()
+            polydata.SetPoints(points)
+            polydata.SetLines(single_cell_array)
 
-        parsed_points = parse_xml_colormap(colormap_xml_path)
+            mapper = vtk.vtkPolyDataMapper()
+            mapper.SetInputData(polydata)
+
+            actor = vtk.vtkActor()
+            actor.SetMapper(mapper)
+            
+            prop = actor.GetProperty()
+            prop.LightingOff()
+            prop.SetLineWidth(fractional_width)
+            
+            if norm_val < 0:
+                prop.SetColor(0.9, 0.1, 0.1)  # Solid Red
+            else:
+                prop.SetColor(0.1, 0.5, 0.9)  # Solid Cyan-Blue
+
+            self.renderer.AddActor(actor)
+            self.varied_actors.append(actor)
+            self.varied_magnitudes.append(magnitude)
+            varied_count += 1
+
+        # Unified actor assembly for identical nodes background matrix
+        self.identical_actor = vtk.vtkActor()
+        if identical_count > 0:
+            polydata_id = vtk.vtkPolyData()
+            polydata_id.SetPoints(points)
+            polydata_id.SetLines(identical_cells)
+
+            mapper_id = vtk.vtkPolyDataMapper()
+            mapper_id.SetInputData(polydata_id)
+
+            self.identical_actor.SetMapper(mapper_id)
+            prop_id = self.identical_actor.GetProperty()
+            prop_id.LightingOff()
+            prop_id.SetColor(0.4, 0.45, 0.5) 
+            prop_id.SetLineWidth(0.6)        
+            self.renderer.AddActor(self.identical_actor)
+
+        print(f"[Render Engine] Parsed {varied_count} mutations and {identical_count} static links.")
         
-        if parsed_points:
-            xp = [pt[0] for pt in parsed_points]
-            r_vals = [pt[1] for pt in parsed_points]
-            g_vals = [pt[2] for pt in parsed_points]
-            b_vals = [pt[3] for pt in parsed_points]
+        # Trigger default initial view layout state manually
+        self.handle_mode_switch(0)
 
-            for i in range(256):
-                t = i / 255.0
-                r = np.interp(t, xp, r_vals)
-                g = np.interp(t, xp, g_vals)
-                b = np.interp(t, xp, b_vals)
-                lut_xml.SetTableValue(i, r, g, b, 1.0)
-        else:
-            for i in range(256):
-                t = i / 255.0
-                if t < 0.5:
-                    f = t * 2.0
-                    lut_xml.SetTableValue(i, f, f, 1.0, 1.0)
-                else:
-                    f = 2.0 * (1.0 - t)
-                    lut_xml.SetTableValue(i, 1.0, f, f, 1.0)
-
-        min_delta = float(diff_weights.min()) if len(diff_weights) else 0.0
-        max_delta = float(diff_weights.max()) if len(diff_weights) else 0.0
-        max_bound = max(abs(min_delta), abs(max_delta))
-
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(polydata)
-        mapper.ScalarVisibilityOn()
-        mapper.SetScalarModeToUseCellData()
-        mapper.SelectColorArray("DifferenceScalars")
-        mapper.SetScalarRange(-max_bound, max_bound)
-        mapper.SetLookupTable(lut_xml)
-
-        actor = vtk.vtkActor()
-        actor.SetMapper(mapper)
-
-        property_obj = actor.GetProperty()
-        property_obj.LightingOff()         
-        property_obj.SetLineWidth(1.0)     
-
-        # Core 3D Base Renderer
-        self.renderer = vtk.vtkRenderer()
-        self.renderer.SetBackground(0.08, 0.09, 0.1)
-        self.renderer.AddActor(actor)
         self.vtkWidget.GetRenderWindow().AddRenderer(self.renderer)
-
-        # ----------------------------------------------------------------
-        # FLIPPED VERTICAL LEGEND OVERLAY SIDEBAR
-        # ----------------------------------------------------------------
-        if os.path.exists(colormap_png_path):
-            png_reader = vtk.vtkPNGReader()
-            png_reader.SetFileName(colormap_png_path)
-            
-            flipper = vtk.vtkImageFlip()
-            flipper.SetInputConnection(png_reader.GetOutputPort())
-            flipper.SetFilteredAxis(1) 
-            flipper.Update()
-
-            img_actor = vtk.vtkImageActor()
-            img_actor.GetMapper().SetInputConnection(flipper.GetOutputPort())
-
-            self.overlay_renderer = vtk.vtkRenderer()
-            self.renderer.SetLayer(0)              
-            self.overlay_renderer.SetLayer(1)      
-            self.vtkWidget.GetRenderWindow().SetNumberOfLayers(2)
-
-            # API FIX: Proper runtime Boolean flag toggle configuration
-            self.overlay_renderer.Transparent()
-            
-            self.overlay_renderer.SetViewport(0.91, 0.15, 0.94, 0.85)
-            self.overlay_renderer.AddActor(img_actor)
-            self.overlay_renderer.InteractiveOff()
-            self.vtkWidget.GetRenderWindow().AddRenderer(self.overlay_renderer)
-
-            # ------------------------------------------------------------
-            # OVERLAY VALUE TEXT GENERATOR
-            # ------------------------------------------------------------
-            self.text_renderer = vtk.vtkRenderer()
-            self.text_renderer.SetLayer(1) 
-            self.text_renderer.SetViewport(0.0, 0.0, 1.0, 1.0) 
-            self.text_renderer.Transparent()
-            self.text_renderer.InteractiveOff()
-
-            def create_text_actor(text_string, x_pos, y_pos):
-                t_actor = vtk.vtkTextActor()
-                t_actor.SetInput(text_string)
-                t_prop = t_actor.GetTextProperty()
-                t_prop.SetFontFamilyToArial()
-                t_prop.SetFontSize(14)
-                t_prop.BoldOn()
-                t_prop.SetColor(0.9, 0.9, 0.9)
-                t_actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-                t_actor.GetPositionCoordinate().SetValue(x_pos, y_pos)
-                return t_actor
-
-            max_label = create_text_actor(f"Max: {max_bound:+.4f}", 0.83, 0.84)
-            min_label = create_text_actor(f"Min: {-max_bound:+.4f}", 0.83, 0.14)
-
-            self.text_renderer.AddActor(max_label)
-            self.text_renderer.AddActor(min_label)
-            self.vtkWidget.GetRenderWindow().AddRenderer(self.text_renderer)
-
-        # Force camera bounds checks
         self.renderer.ResetCamera()
         self.renderer.ResetCameraClippingRange()
 
@@ -300,8 +235,59 @@ class ComparativeViewer(QMainWindow):
         self.vtkWidget.SetInteractorStyle(vtk.vtkInteractorStyleTrackballCamera())
         self.vtkWidget.GetRenderWindow().Render()
 
+    # ===================================================================
+    # INTERACTIVE CONTROL PANEL LOGIC CALLBACKS
+    # ===================================================================
+    def handle_mode_switch(self, index):
+        # index 0 -> "Difference View Only"
+        # index 1 -> "Identical Edges Only"
+        # index 2 -> "Show Both Networks Combined"
+        
+        # CRITICAL DISABLING SWITCH RULE: Disable slider when picking option 2 (Identical Edges Only)
+        if index == 1:
+            self.filter_slider.setEnabled(False)
+            self.slider_label.setText("<b>Threshold value: N/A</b>")
+        else:
+            self.filter_slider.setEnabled(True)
+            # Restore proper slider label value text context
+            current_thresh = self.filter_slider.value() / 100.0
+            self.slider_label.setText(f"<b>Threshold value: {current_thresh:.2f}</b>")
+
+        # Refresh visibility layout based on combined current rules
+        self.apply_visibility_rules()
+
+    def handle_slider_filter(self, value):
+        threshold = value / 100.0
+        self.slider_label.setText(f"<b>Threshold value: {threshold:.2f}</b>")
+        self.apply_visibility_rules()
+
+    def apply_visibility_rules(self):
+        mode_idx = self.mode_dropdown.currentIndex()
+        threshold = self.filter_slider.value() / 100.0
+
+        show_varied = (mode_idx == 0 or mode_idx == 2)
+        show_identical = (mode_idx == 1 or mode_idx == 2)
+
+        # Loop through varied actors applying both mode status and active slider bounds thresholds
+        for actor, mag in zip(self.varied_actors, self.varied_magnitudes):
+            if show_varied and mag >= threshold:
+                actor.VisibilityOn()
+            else:
+                actor.VisibilityOff()
+
+        # Handle identical matrix actor visibility tracking state
+        if self.identical_actor:
+            if show_identical:
+                self.identical_actor.VisibilityOn()
+            else:
+                self.identical_actor.VisibilityOff()
+
+        # Update render window frame context immediately
+        if hasattr(self, 'vtkWidget') and self.vtkWidget.GetRenderWindow():
+            self.vtkWidget.GetRenderWindow().Render()
+
 # ===================================================================
-# 4. RUNTIME Entry
+# 3. RUNTIME ENTRY
 # ===================================================================
 def main():
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)

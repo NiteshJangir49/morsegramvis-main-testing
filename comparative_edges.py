@@ -9,9 +9,6 @@ from PySide6.QtCore import Qt
 import vtkmodules.all as vtk
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
-# ===================================================================
-# 1. CORE DATA COMPILING LAYER (SYNCHRONIZED WITH THE 5% GENERATOR)
-# ===================================================================
 def compute_network_data(particles_csv, contact_vtp):
     if not os.path.exists(particles_csv) or not os.path.exists(contact_vtp):
         print(f"[Error] Missing paths:\nParticles: {particles_csv}\nContacts: {contact_vtp}")
@@ -89,9 +86,6 @@ def compute_network_data(particles_csv, contact_vtp):
     diff_weights = weights_A - weights_B
     return points, edge_list, diff_weights
 
-# ===================================================================
-# 2. INTERFACE LAYER WITH DROPDOWN MODE SWITCHING & SLIDER FILTER
-# ===================================================================
 class ComparativeViewer(QMainWindow):
     def __init__(self, points, edge_list, diff_weights):
         super().__init__()
@@ -105,7 +99,6 @@ class ComparativeViewer(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # Build Clean Dropdown & Slider Control Panel
         control_layout = QHBoxLayout()
         control_layout.addWidget(QLabel("<b>Visualization Mode:</b>"))
         
@@ -120,7 +113,6 @@ class ComparativeViewer(QMainWindow):
         
         control_layout.addSpacing(30)
         
-        # Add Thresholding Filter Slider
         self.slider_label = QLabel("<b>Threshold value: 0.00</b>")
         control_layout.addWidget(self.slider_label)
         
@@ -141,18 +133,15 @@ class ComparativeViewer(QMainWindow):
         self.renderer = vtk.vtkRenderer()
         self.renderer.SetBackground(0.08, 0.09, 0.1)
 
-        # Normalization Step (-1 to 1 range)
         max_val = max(abs(diff_weights.min()), abs(diff_weights.max())) if len(diff_weights) else 1.0
         if max_val == 0: max_val = 1e-4
         self.normalized_diffs = diff_weights / max_val 
 
-        # Width specification targets
         min_line_width = 0.1  
         max_line_width = 4.0 
 
         identical_cells = vtk.vtkCellArray()
         
-        # Parallel lists to link actors with their respective magnitude metadata
         self.varied_actors = []
         self.varied_magnitudes = []
         
@@ -162,7 +151,6 @@ class ComparativeViewer(QMainWindow):
         for i, edge in enumerate(edge_list):
             norm_val = self.normalized_diffs[i]
             
-            # Check for static structural matches
             if abs(norm_val) < 1e-6:
                 line = vtk.vtkLine()
                 line.GetPointIds().SetId(0, edge[0])
@@ -196,16 +184,15 @@ class ComparativeViewer(QMainWindow):
             prop.SetLineWidth(fractional_width)
             
             if norm_val < 0:
-                prop.SetColor(0.9, 0.1, 0.1)  # Solid Red
+                prop.SetColor(0.9, 0.1, 0.1)  
             else:
-                prop.SetColor(0.1, 0.5, 0.9)  # Solid Cyan-Blue
+                prop.SetColor(0.1, 0.5, 0.9)  
 
             self.renderer.AddActor(actor)
             self.varied_actors.append(actor)
             self.varied_magnitudes.append(magnitude)
             varied_count += 1
 
-        # Unified actor assembly for identical nodes background matrix
         self.identical_actor = vtk.vtkActor()
         if identical_count > 0:
             polydata_id = vtk.vtkPolyData()
@@ -224,7 +211,6 @@ class ComparativeViewer(QMainWindow):
 
         print(f"[Render Engine] Parsed {varied_count} mutations and {identical_count} static links.")
         
-        # Trigger default initial view layout state manually
         self.handle_mode_switch(0)
 
         self.vtkWidget.GetRenderWindow().AddRenderer(self.renderer)
@@ -235,25 +221,15 @@ class ComparativeViewer(QMainWindow):
         self.vtkWidget.SetInteractorStyle(vtk.vtkInteractorStyleTrackballCamera())
         self.vtkWidget.GetRenderWindow().Render()
 
-    # ===================================================================
-    # INTERACTIVE CONTROL PANEL LOGIC CALLBACKS
-    # ===================================================================
     def handle_mode_switch(self, index):
-        # index 0 -> "Difference View Only"
-        # index 1 -> "Identical Edges Only"
-        # index 2 -> "Show Both Networks Combined"
-        
-        # CRITICAL DISABLING SWITCH RULE: Disable slider when picking option 2 (Identical Edges Only)
         if index == 1:
             self.filter_slider.setEnabled(False)
             self.slider_label.setText("<b>Threshold value: N/A</b>")
         else:
             self.filter_slider.setEnabled(True)
-            # Restore proper slider label value text context
             current_thresh = self.filter_slider.value() / 100.0
             self.slider_label.setText(f"<b>Threshold value: {current_thresh:.2f}</b>")
 
-        # Refresh visibility layout based on combined current rules
         self.apply_visibility_rules()
 
     def handle_slider_filter(self, value):
@@ -268,27 +244,21 @@ class ComparativeViewer(QMainWindow):
         show_varied = (mode_idx == 0 or mode_idx == 2)
         show_identical = (mode_idx == 1 or mode_idx == 2)
 
-        # Loop through varied actors applying both mode status and active slider bounds thresholds
         for actor, mag in zip(self.varied_actors, self.varied_magnitudes):
             if show_varied and mag >= threshold:
                 actor.VisibilityOn()
             else:
                 actor.VisibilityOff()
 
-        # Handle identical matrix actor visibility tracking state
         if self.identical_actor:
             if show_identical:
                 self.identical_actor.VisibilityOn()
             else:
                 self.identical_actor.VisibilityOff()
 
-        # Update render window frame context immediately
         if hasattr(self, 'vtkWidget') and self.vtkWidget.GetRenderWindow():
             self.vtkWidget.GetRenderWindow().Render()
 
-# ===================================================================
-# 3. RUNTIME ENTRY
-# ===================================================================
 def main():
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 

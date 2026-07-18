@@ -57,7 +57,7 @@ def load_dual_node_volume_data(particles_csv, node_vtp_path_A, node_vtp_path_B):
 class FullHeightmapViewer(QMainWindow):
     def __init__(self, center_coords, weights_A, weights_B):
         super().__init__()
-        self.setWindowTitle("DiffSeer View - Single Monolithic Bars")
+        self.setWindowTitle("DiffSeer View - Solid Binary Colors")
         self.setGeometry(100, 100, 1500, 850)
 
         self.center_coords = center_coords
@@ -92,7 +92,6 @@ class FullHeightmapViewer(QMainWindow):
         
         control_layout.addSpacing(20)
         
-        # HEIGHT SCALE SLIDER (NORMALIZED 0 - 100)
         self.height_label = QLabel("<b>Height Scale: 20%</b>")
         control_layout.addWidget(self.height_label)
         self.height_slider = QSlider(Qt.Horizontal)
@@ -105,7 +104,6 @@ class FullHeightmapViewer(QMainWindow):
 
         control_layout.addSpacing(20)
 
-        # BOX WIDTH SLIDER (NORMALIZED 0 - 100)
         self.box_width_label = QLabel("<b>Box Width: 15%</b>")
         control_layout.addWidget(self.box_width_label)
         self.box_width_slider = QSlider(Qt.Horizontal)
@@ -149,31 +147,33 @@ class FullHeightmapViewer(QMainWindow):
         self.renderer = vtk.vtkRenderer()
         self.renderer.SetBackground(0.08, 0.09, 0.1)
 
+        # UNIFIED SOLID LOOKUP TABLES
         self.lut_A = vtk.vtkLookupTable()
-        self.lut_A.SetNumberOfTableValues(256)
-        self.lut_A.SetHueRange(0.15, 0.0) 
+        self.lut_A.SetNumberOfTableValues(1)
+        self.lut_A.SetTableValue(0, 0.9, 0.6, 0.1, 1.0) # Solid Gold/Orange for Volume A
         self.lut_A.Build()
 
         self.lut_B = vtk.vtkLookupTable()
-        self.lut_B.SetNumberOfTableValues(256)
-        self.lut_B.SetHueRange(0.55, 0.65)  
+        self.lut_B.SetNumberOfTableValues(1)
+        self.lut_B.SetTableValue(0, 0.1, 0.6, 0.9, 1.0) # Solid Light Blue for Volume B
         self.lut_B.Build()
 
         self.lut_diff = vtk.vtkLookupTable()
-        self.lut_diff.SetNumberOfTableValues(256)
+        self.lut_diff.SetNumberOfTableValues(2)
+        # Index 0 (Negative difference values -> Volume B is greater)
+        self.lut_diff.SetTableValue(0, 0.9, 0.2, 0.2, 1.0) # Pure solid Red
+        # Index 1 (Positive difference values -> Volume A is greater)
+        self.lut_diff.SetTableValue(1, 0.2, 0.5, 0.9, 1.0) # Pure solid Blue
         self.lut_diff.Build()
-        for i in range(256):
-            t = i / 255.0
-            if t < 0.5:
-                f = t * 2.0
-                self.lut_diff.SetTableValue(i, 0.9, 0.2 * f, 0.2 * f, 1.0)
-            else:
-                f = (t - 0.5) * 2.0
-                self.lut_diff.SetTableValue(i, 0.4 * (1.0 - f), 0.45 + (0.05 * f), 0.5 + (0.4 * f), 1.0)
 
         self.actor_A = vtk.vtkActor()
         self.actor_B = vtk.vtkActor()
         self.actor_diff = vtk.vtkActor()
+
+        for actor in [self.actor_A, self.actor_B, self.actor_diff]:
+            prop = actor.GetProperty()
+            prop.SetInterpolationToFlat()
+            prop.BackfaceCullingOn()
 
         self.renderer.AddActor(self.actor_A)
         self.renderer.AddActor(self.actor_B)
@@ -252,7 +252,7 @@ class FullHeightmapViewer(QMainWindow):
                 iu = min(iu, grid_res_u - 1)
                 iv = min(iv, grid_res_v - 1)
             
-            if is_diff and abs(w) < 1e-5:
+            if is_diff and abs(w) < 1e-4:
                 continue
             bin_contents[iu][iv].append(w)
 
@@ -265,14 +265,13 @@ class FullHeightmapViewer(QMainWindow):
 
         safe_clearance_plane = self.max_coords[axis_idx] + 2.0
         
-        # Symmetrically shift baseline so negative absolute bars don't hit the particles
         if is_diff:
             max_possible_height = scale * 10.0
             base_h_plane = safe_clearance_plane + max_possible_height
         else:
             base_h_plane = safe_clearance_plane
 
-        bar_thickness_ratio = 0.85
+        bar_thickness_ratio = 1.00
         size_u = box_width * bar_thickness_ratio
         size_v = box_width * bar_thickness_ratio
 
@@ -285,22 +284,21 @@ class FullHeightmapViewer(QMainWindow):
                 cell_weights = np.array(bin_contents[iu][iv])
                 if len(cell_weights) == 0: continue
 
-                # Calculate a single average value per spatial box position
                 avg_value = np.mean(cell_weights)
-                if is_diff and abs(avg_value) < 1e-5: continue
+                if abs(avg_value) < 1e-4: continue
 
-                # Compute scale metrics and target positioning vector elements
                 bar_height = abs(avg_value / max_abs) * scale * 10.0 if is_diff else ((avg_value - global_min_w) / (global_max_w - global_min_w)) * scale * 10.0
-                bar_height = max(0.2, bar_height) # Keep small features visible
+                bar_height = max(0.2, bar_height) 
 
                 if is_diff:
-                    val_scalar = avg_value / max_abs
+                    # Binary color logic map: negative index maps to 0 (Red), positive maps to 1 (Blue)
+                    val_scalar = -0.5 if avg_value < 0 else 0.5
                     if avg_value < 0:
                         h_center = base_h_plane - (bar_height / 2.0)
                     else:
                         h_center = base_h_plane + (bar_height / 2.0)
                 else:
-                    val_scalar = (avg_value - global_min_w) / (global_max_w - global_min_w)
+                    val_scalar = 0.0 # Maps to standard locked single value index
                     h_center = base_h_plane + (bar_height / 2.0)
 
                 has_geometry = True
@@ -316,7 +314,14 @@ class FullHeightmapViewer(QMainWindow):
         mapper.SetInputData(poly_data)
         mapper.ScalarVisibilityOn()
         mapper.SetLookupTable(lut)
-        mapper.SetScalarRange(-1.0 if is_diff else 0.0, 1.0)
+        
+        if is_diff:
+            mapper.SetScalarRange(-1.0, 1.0)
+        else:
+            mapper.SetScalarRange(0.0, 1.0)
+        
+        mapper.SetResolveCoincidentTopologyToPolygonOffset()
+        mapper.SetResolveCoincidentTopologyPolygonOffsetParameters(1.0, 1.0)
         
         return mapper
 
@@ -385,16 +390,13 @@ class FullHeightmapViewer(QMainWindow):
 
         mapper_A = self.generate_spatial_histogram_mesh(self.weights_A, axis_index, self.lut_A, current_scale, is_diff=False)
         self.actor_A.SetMapper(mapper_A)
-        self.actor_A.GetProperty().SetInterpolationToFlat()
 
         mapper_B = self.generate_spatial_histogram_mesh(self.weights_B, axis_index, self.lut_B, current_scale, is_diff=False)
         self.actor_B.SetMapper(mapper_B)
-        self.actor_B.GetProperty().SetInterpolationToFlat()
 
         diff_weights = self.weights_A - self.weights_B
         mapper_diff = self.generate_spatial_histogram_mesh(diff_weights, axis_index, self.lut_diff, current_scale, is_diff=True)
         self.actor_diff.SetMapper(mapper_diff)
-        self.actor_diff.GetProperty().SetInterpolationToFlat()
 
         self.handle_mode_switch(self.mode_dropdown.currentIndex())
 

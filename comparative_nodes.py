@@ -57,12 +57,15 @@ def load_dual_node_volume_data(particles_csv, node_vtp_path_A, node_vtp_path_B):
 class FullHeightmapViewer(QMainWindow):
     def __init__(self, center_coords, weights_A, weights_B):
         super().__init__()
-        self.setWindowTitle("DiffSeer view")
+        self.setWindowTitle("DiffSeer View - Single Monolithic Bars")
         self.setGeometry(100, 100, 1500, 850)
 
         self.center_coords = center_coords
         self.weights_A = weights_A
         self.weights_B = weights_B
+
+        self.min_coords = center_coords.min(axis=0)
+        self.max_coords = center_coords.max(axis=0)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -89,15 +92,29 @@ class FullHeightmapViewer(QMainWindow):
         
         control_layout.addSpacing(20)
         
-        self.height_label = QLabel("<b>Height Scale: 4.0x</b>")
+        # HEIGHT SCALE SLIDER (NORMALIZED 0 - 100)
+        self.height_label = QLabel("<b>Height Scale: 20%</b>")
         control_layout.addWidget(self.height_label)
         self.height_slider = QSlider(Qt.Horizontal)
-        self.height_slider.setMinimum(5)   
-        self.height_slider.setMaximum(800)  
-        self.height_slider.setValue(40)   
+        self.height_slider.setMinimum(0)   
+        self.height_slider.setMaximum(100)  
+        self.height_slider.setValue(20)   
         self.height_slider.setFixedWidth(110)
         self.height_slider.valueChanged.connect(self.handle_geometry_update)
         control_layout.addWidget(self.height_slider)
+
+        control_layout.addSpacing(20)
+
+        # BOX WIDTH SLIDER (NORMALIZED 0 - 100)
+        self.box_width_label = QLabel("<b>Box Width: 15%</b>")
+        control_layout.addWidget(self.box_width_label)
+        self.box_width_slider = QSlider(Qt.Horizontal)
+        self.box_width_slider.setMinimum(0)   
+        self.box_width_slider.setMaximum(100)  
+        self.box_width_slider.setValue(15)   
+        self.box_width_slider.setFixedWidth(110)
+        self.box_width_slider.valueChanged.connect(self.handle_box_width_update)
+        control_layout.addWidget(self.box_width_slider)
 
         control_layout.addSpacing(20)
         
@@ -132,11 +149,6 @@ class FullHeightmapViewer(QMainWindow):
         self.renderer = vtk.vtkRenderer()
         self.renderer.SetBackground(0.08, 0.09, 0.1)
 
-        self.grid_res_u = 50
-        self.grid_res_v = 50
-        self.min_coords = center_coords.min(axis=0)
-        self.max_coords = center_coords.max(axis=0)
-
         self.lut_A = vtk.vtkLookupTable()
         self.lut_A.SetNumberOfTableValues(256)
         self.lut_A.SetHueRange(0.15, 0.0) 
@@ -159,16 +171,8 @@ class FullHeightmapViewer(QMainWindow):
                 f = (t - 0.5) * 2.0
                 self.lut_diff.SetTableValue(i, 0.4 * (1.0 - f), 0.45 + (0.05 * f), 0.5 + (0.4 * f), 1.0)
 
-        self.surface_points_A = vtk.vtkPoints()
-        self.poly_A = vtk.vtkPolyData()
         self.actor_A = vtk.vtkActor()
-
-        self.surface_points_B = vtk.vtkPoints()
-        self.poly_B = vtk.vtkPolyData()
         self.actor_B = vtk.vtkActor()
-
-        self.surface_points_diff = vtk.vtkPoints()
-        self.poly_diff = vtk.vtkPolyData()
         self.actor_diff = vtk.vtkActor()
 
         self.renderer.AddActor(self.actor_A)
@@ -197,116 +201,167 @@ class FullHeightmapViewer(QMainWindow):
         self.vtkWidget.SetInteractorStyle(vtk.vtkInteractorStyleTrackballCamera())
 
         self.handle_axis_switch(0)
-        self.reset_camera_to_full_volume()
 
-    def compute_axis_averages(self, weights, axis_idx):
+    def get_physical_box_width(self, axis_idx):
+        rem_axes = [i for i in [0, 1, 2] if i != axis_idx]
+        span_u = self.max_coords[rem_axes[0]] - self.min_coords[rem_axes[0]]
+        span_v = self.max_coords[rem_axes[1]] - self.min_coords[rem_axes[1]]
+        min_lateral_span = min(span_u, span_v) or 1.0
+
+        slider_val = self.box_width_slider.value()
+        if slider_val == 100:
+            return max(span_u, span_v) or 1.0
+
+        slider_pct = slider_val / 100.0
+        mapped_width = min_lateral_span * (0.01 + slider_pct * 0.34)
+        return max(0.1, mapped_width)
+
+    def get_mapped_height_scale(self):
+        slider_pct = self.height_slider.value() / 100.0
+        return 0.5 + (slider_pct * 39.5)
+
+    def generate_spatial_histogram_mesh(self, weights, axis_idx, lut, scale, is_diff=False):
         rem_axes = [i for i in [0, 1, 2] if i != axis_idx]
         u_ax, v_ax = rem_axes[0], rem_axes[1]
 
         min_u, max_u = self.min_coords[u_ax], self.max_coords[u_ax]
         min_v, max_v = self.min_coords[v_ax], self.max_coords[v_ax]
 
-        du = (max_u - min_u) / (self.grid_res_u - 1) if max_u != min_u else 1.0
-        dv = (max_v - min_v) / (self.grid_res_v - 1) if max_v != min_v else 1.0
+        box_width = self.get_physical_box_width(axis_idx)
+        slider_val = self.box_width_slider.value()
 
-        accum_w = np.zeros((self.grid_res_u, self.grid_res_v))
-        accum_c = np.zeros((self.grid_res_u, self.grid_res_v))
+        if slider_val == 100:
+            grid_res_u, grid_res_v = 1, 1
+            max_u = min_u + box_width
+            max_v = min_v + box_width
+        else:
+            grid_res_u = max(2, int(np.ceil((max_u - min_u) / box_width)))
+            grid_res_v = max(2, int(np.ceil((max_v - min_v) / box_width)))
+            max_u = min_u + (grid_res_u * box_width)
+            max_v = min_v + (grid_res_v * box_width)
 
+        bin_contents = [[[] for _ in range(grid_res_v)] for _ in range(grid_res_u)]
         for pt, w in zip(self.center_coords, weights):
-            iu = min(int((pt[u_ax] - min_u) / du), self.grid_res_u - 1)
-            iv = min(int((pt[v_ax] - min_v) / dv), self.grid_res_v - 1)
-            accum_w[iu, iv] += w
-            accum_c[iu, iv] += 1
+            if slider_val == 100:
+                iu, iv = 0, 0
+            else:
+                if pt[u_ax] < min_u or pt[u_ax] >= max_u or pt[v_ax] < min_v or pt[v_ax] >= max_v:
+                    continue
+                iu = int((pt[u_ax] - min_u) / box_width)
+                iv = int((pt[v_ax] - min_v) / box_width)
+                iu = min(iu, grid_res_u - 1)
+                iv = min(iv, grid_res_v - 1)
+            
+            if is_diff and abs(w) < 1e-5:
+                continue
+            bin_contents[iu][iv].append(w)
 
-        avg_grid = np.zeros((self.grid_res_u, self.grid_res_v))
-        for iu in range(self.grid_res_u):
-            for iv in range(self.grid_res_v):
-                if accum_c[iu, iv] > 0:
-                    avg_grid[iu, iv] = accum_w[iu, iv] / accum_c[iu, iv]
-        return avg_grid
+        append_filter = vtk.vtkAppendPolyData()
+        has_geometry = False
 
-    def update_heightmap_geometry(self, normalized_grid, out_points, poly, actor, lut, scale, axis_idx, is_diff=False):
-        rem_axes = [i for i in [0, 1, 2] if i != axis_idx]
-        u_ax, v_ax = rem_axes[0], rem_axes[1]
+        global_min_w = weights.min()
+        global_max_w = weights.max()
+        max_abs = max(abs(global_min_w), abs(global_max_w)) or 1.0
 
-        grid_u = np.linspace(self.min_coords[u_ax], self.max_coords[u_ax], self.grid_res_u)
-        grid_v = np.linspace(self.min_coords[v_ax], self.max_coords[v_ax], self.grid_res_v)
+        safe_clearance_plane = self.max_coords[axis_idx] + 2.0
+        
+        # Symmetrically shift baseline so negative absolute bars don't hit the particles
+        if is_diff:
+            max_possible_height = scale * 10.0
+            base_h_plane = safe_clearance_plane + max_possible_height
+        else:
+            base_h_plane = safe_clearance_plane
 
-        base_h_plane = self.max_coords[axis_idx] + 1.0
-        min_val = normalized_grid.min()
-        h_shift = abs(min_val) if (is_diff and min_val < 0) else 0.0
-        adjusted_base_h = base_h_plane + (h_shift * scale)
+        bar_thickness_ratio = 0.85
+        size_u = box_width * bar_thickness_ratio
+        size_v = box_width * bar_thickness_ratio
 
-        out_points.Reset()
-        scalars = vtk.vtkFloatArray()
-        scalars.SetNumberOfValues(self.grid_res_u * self.grid_res_v)
-
-        pt_coord = [0.0, 0.0, 0.0]
-        idx = 0
-        for iu in range(self.grid_res_u):
-            for iv in range(self.grid_res_v):
-                val = normalized_grid[iu, iv]
-                h_val = adjusted_base_h + (val * scale)
+        for iu in range(grid_res_u):
+            u_center = (self.min_coords[u_ax] + self.max_coords[u_ax]) / 2.0 if slider_val == 100 else min_u + (iu + 0.5) * box_width
                 
-                pt_coord[u_ax] = grid_u[iu]
-                pt_coord[v_ax] = grid_v[iv]
-                pt_coord[axis_idx] = h_val
-                
-                out_points.InsertNextPoint(pt_coord[0], pt_coord[1], pt_coord[2])
-                scalars.SetValue(idx, val)
-                idx += 1
+            for iv in range(grid_res_v):
+                v_center = (self.min_coords[v_ax] + self.max_coords[v_ax]) / 2.0 if slider_val == 100 else min_v + (iv + 0.5) * box_width
+                    
+                cell_weights = np.array(bin_contents[iu][iv])
+                if len(cell_weights) == 0: continue
 
-        poly.SetPoints(out_points)
-        poly.GetPointData().SetScalars(scalars)
+                # Calculate a single average value per spatial box position
+                avg_value = np.mean(cell_weights)
+                if is_diff and abs(avg_value) < 1e-5: continue
 
-        if poly.GetNumberOfPolys() == 0:
-            cells = vtk.vtkCellArray()
-            for iu in range(self.grid_res_u - 1):
-                for iv in range(self.grid_res_v - 1):
-                    p0 = iu * self.grid_res_v + iv
-                    p1 = (iu + 1) * self.grid_res_v + iv
-                    p2 = (iu + 1) * self.grid_res_v + (iv + 1)
-                    p3 = iu * self.grid_res_v + (iv + 1)
-                    quad = vtk.vtkQuad()
-                    quad.GetPointIds().SetId(0, p0)
-                    quad.GetPointIds().SetId(1, p1)
-                    quad.GetPointIds().SetId(2, p2)
-                    quad.GetPointIds().SetId(3, p3)
-                    cells.InsertNextCell(quad)
-            poly.SetPolys(cells)
+                # Compute scale metrics and target positioning vector elements
+                bar_height = abs(avg_value / max_abs) * scale * 10.0 if is_diff else ((avg_value - global_min_w) / (global_max_w - global_min_w)) * scale * 10.0
+                bar_height = max(0.2, bar_height) # Keep small features visible
+
+                if is_diff:
+                    val_scalar = avg_value / max_abs
+                    if avg_value < 0:
+                        h_center = base_h_plane - (bar_height / 2.0)
+                    else:
+                        h_center = base_h_plane + (bar_height / 2.0)
+                else:
+                    val_scalar = (avg_value - global_min_w) / (global_max_w - global_min_w)
+                    h_center = base_h_plane + (bar_height / 2.0)
+
+                has_geometry = True
+                poly_box = self.make_cube_geometry(u_center, v_center, h_center, size_u, size_v, bar_height, val_scalar, u_ax, v_ax, axis_idx)
+                append_filter.AddInputData(poly_box)
+
+        poly_data = vtk.vtkPolyData()
+        if has_geometry:
+            append_filter.Update()
+            poly_data.ShallowCopy(append_filter.GetOutput())
 
         mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(poly)
+        mapper.SetInputData(poly_data)
         mapper.ScalarVisibilityOn()
-        mapper.SetScalarRange(-1.0 if is_diff else 0.0, 1.0)
         mapper.SetLookupTable(lut)
+        mapper.SetScalarRange(-1.0 if is_diff else 0.0, 1.0)
+        
+        return mapper
 
-        actor.SetMapper(mapper)
-        prop = actor.GetProperty()
-        prop.SetRepresentationToSurface()
-        prop.SetInterpolationToPhong()
-        prop.LightingOn()
+    def make_cube_geometry(self, uc, vc, hc, su, sv, sh, scalar_val, u_ax, v_ax, axis_idx):
+        cube = vtk.vtkCubeSource()
+        dims = [0.0, 0.0, 0.0]
+        dims[u_ax] = su
+        dims[v_ax] = sv
+        dims[axis_idx] = sh
+        cube.SetXLength(dims[0])
+        cube.SetYLength(dims[1])
+        cube.SetZLength(dims[2])
+
+        pos = [0.0, 0.0, 0.0]
+        pos[u_ax] = uc
+        pos[v_ax] = vc
+        pos[axis_idx] = hc
+        cube.SetCenter(pos[0], pos[1], pos[2])
+        cube.Update()
+
+        poly = cube.GetOutput()
+        scalars = vtk.vtkFloatArray()
+        scalars.SetNumberOfValues(poly.GetNumberOfPoints())
+        for p in range(poly.GetNumberOfPoints()):
+            scalars.SetValue(p, scalar_val)
+        poly.GetPointData().SetScalars(scalars)
+        return poly
 
     def reset_camera_to_full_volume(self):
-        """Calculates total coordinate extents covering both the particles 
-        and the heightmap peak projections, forcing camera focal boundaries."""
-        current_scale = self.height_slider.value() / 10.0
         axis_index = self.axis_dropdown.currentIndex()
-        
         total_min = list(self.min_coords)
         total_max = list(self.max_coords)
         
-        base_h_plane = self.max_coords[axis_index] + 1.0
+        active_actor = self.actor_diff if self.mode_dropdown.currentIndex() == 1 else self.actor_A
         
-        if self.mode_dropdown.currentIndex() == 0:
-            max_height = base_h_plane + (1.0 * current_scale)
-        else:
-            min_diff = self.grid_data_diff.min()
-            z_shift = abs(min_diff) if min_diff < 0 else 0.0
-            max_height = base_h_plane + (z_shift * current_scale) + (1.0 * current_scale)
-            
-        total_max[axis_index] = max_height
+        if active_actor and active_actor.GetMapper() and active_actor.GetMapper().GetInput():
+            bounds = active_actor.GetBounds()
+            if bounds[0] <= bounds[1]:
+                total_min[axis_index] = min(total_min[axis_index], bounds[axis_index * 2])
+                total_max[axis_index] = max(total_max[axis_index], bounds[axis_index * 2 + 1])
         
+        span = total_max[axis_index] - total_min[axis_index]
+        total_min[axis_index] -= span * 0.1
+        total_max[axis_index] += span * 0.1
+
         self.renderer.ResetCamera(
             total_min[0], total_max[0],
             total_min[1], total_max[1],
@@ -317,29 +372,29 @@ class FullHeightmapViewer(QMainWindow):
             self.vtkWidget.GetRenderWindow().Render()
 
     def handle_axis_switch(self, axis_index):
-        grid_A = self.compute_axis_averages(self.weights_A, axis_index)
-        grid_B = self.compute_axis_averages(self.weights_B, axis_index)
-        grid_diff = grid_A - grid_B
-
-        max_val_A = grid_A.max() if grid_A.max() != 0 else 1.0
-        max_val_B = grid_B.max() if grid_B.max() != 0 else 1.0
-        max_val_diff = max(abs(grid_diff.min()), abs(grid_diff.max())) if max(grid_diff.min(), grid_diff.max()) != 0 else 1.0
-
-        self.grid_data_A = grid_A / max_val_A
-        self.grid_data_B = grid_B / max_val_B
-        self.grid_data_diff = grid_diff / max_val_diff
-
         self.handle_geometry_update()
-        self.reset_camera_to_full_volume()
+
+    def handle_box_width_update(self, value):
+        self.box_width_label.setText(f"<b>Box Width: {int(value)}%</b>")
+        self.handle_geometry_update()
 
     def handle_geometry_update(self):
-        current_scale = self.height_slider.value() / 10.0
-        self.height_label.setText(f"<b>Height Scale: {current_scale:.1f}x</b>")
+        self.height_label.setText(f"<b>Height Scale: {int(self.height_slider.value())}%</b>")
+        current_scale = self.get_mapped_height_scale()
         axis_index = self.axis_dropdown.currentIndex()
 
-        self.update_heightmap_geometry(self.grid_data_A, self.surface_points_A, self.poly_A, self.actor_A, self.lut_A, current_scale, axis_index, is_diff=False)
-        self.update_heightmap_geometry(self.grid_data_B, self.surface_points_B, self.poly_B, self.actor_B, self.lut_B, current_scale, axis_index, is_diff=False)
-        self.update_heightmap_geometry(self.grid_data_diff, self.surface_points_diff, self.poly_diff, self.actor_diff, self.lut_diff, current_scale, axis_index, is_diff=True)
+        mapper_A = self.generate_spatial_histogram_mesh(self.weights_A, axis_index, self.lut_A, current_scale, is_diff=False)
+        self.actor_A.SetMapper(mapper_A)
+        self.actor_A.GetProperty().SetInterpolationToFlat()
+
+        mapper_B = self.generate_spatial_histogram_mesh(self.weights_B, axis_index, self.lut_B, current_scale, is_diff=False)
+        self.actor_B.SetMapper(mapper_B)
+        self.actor_B.GetProperty().SetInterpolationToFlat()
+
+        diff_weights = self.weights_A - self.weights_B
+        mapper_diff = self.generate_spatial_histogram_mesh(diff_weights, axis_index, self.lut_diff, current_scale, is_diff=True)
+        self.actor_diff.SetMapper(mapper_diff)
+        self.actor_diff.GetProperty().SetInterpolationToFlat()
 
         self.handle_mode_switch(self.mode_dropdown.currentIndex())
 
@@ -384,7 +439,6 @@ class FullHeightmapViewer(QMainWindow):
             self.opacity_label_B.setText(f"<b>Volume B Opacity: {alpha:.2f}</b>")
             if self.actor_B: self.actor_B.GetProperty().SetOpacity(alpha)
         self.vtkWidget.GetRenderWindow().Render()
-
 
 def main():
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import sys
 
-from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QComboBox
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QComboBox, QCheckBox
 from PySide6.QtCore import Qt
 import vtkmodules.all as vtk
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
@@ -54,10 +54,11 @@ def load_dual_node_volume_data(particles_csv, node_vtp_path_A, node_vtp_path_B):
 
     return center_coords, weights_A, weights_B
 
+
 class FullHeightmapViewer(QMainWindow):
     def __init__(self, center_coords, weights_A, weights_B):
         super().__init__()
-        self.setWindowTitle("DiffSeer View - Solid Binary Colors")
+        self.setWindowTitle("Histogram Heightmap Viewer")
         self.setGeometry(100, 100, 1500, 850)
 
         self.center_coords = center_coords
@@ -66,6 +67,11 @@ class FullHeightmapViewer(QMainWindow):
 
         self.min_coords = center_coords.min(axis=0)
         self.max_coords = center_coords.max(axis=0)
+        
+        from scipy.spatial import cKDTree
+        tree = cKDTree(self.center_coords)
+        distances, _ = tree.query(self.center_coords, k=2)
+        self.max_safe_particle_radius = (np.min(distances[:, 1]) if len(distances) > 0 else 2.0) * 0.65
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -82,7 +88,14 @@ class FullHeightmapViewer(QMainWindow):
         self.mode_dropdown.currentIndexChanged.connect(self.handle_mode_switch)
         control_layout.addWidget(self.mode_dropdown)
         
-        control_layout.addSpacing(20)
+        control_layout.addSpacing(15)
+
+        self.diff_toggle = QCheckBox("Colored particles")
+        self.diff_toggle.setChecked(True)
+        self.diff_toggle.stateChanged.connect(self.handle_diff_toggle_change)
+        control_layout.addWidget(self.diff_toggle)
+
+        control_layout.addSpacing(15)
 
         control_layout.addWidget(QLabel("<b>Projection Axis:</b>"))
         self.axis_dropdown = QComboBox()
@@ -90,7 +103,7 @@ class FullHeightmapViewer(QMainWindow):
         self.axis_dropdown.currentIndexChanged.connect(self.handle_axis_switch)
         control_layout.addWidget(self.axis_dropdown)
         
-        control_layout.addSpacing(20)
+        control_layout.addSpacing(15)
         
         self.height_label = QLabel("<b>Height Scale: 20%</b>")
         control_layout.addWidget(self.height_label)
@@ -98,11 +111,11 @@ class FullHeightmapViewer(QMainWindow):
         self.height_slider.setMinimum(0)   
         self.height_slider.setMaximum(100)  
         self.height_slider.setValue(20)   
-        self.height_slider.setFixedWidth(110)
+        self.height_slider.setFixedWidth(100)
         self.height_slider.valueChanged.connect(self.handle_geometry_update)
         control_layout.addWidget(self.height_slider)
 
-        control_layout.addSpacing(20)
+        control_layout.addSpacing(15)
 
         self.box_width_label = QLabel("<b>Box Width: 15%</b>")
         control_layout.addWidget(self.box_width_label)
@@ -110,31 +123,44 @@ class FullHeightmapViewer(QMainWindow):
         self.box_width_slider.setMinimum(0)   
         self.box_width_slider.setMaximum(100)  
         self.box_width_slider.setValue(15)   
-        self.box_width_slider.setFixedWidth(110)
+        self.box_width_slider.setFixedWidth(100)
         self.box_width_slider.valueChanged.connect(self.handle_box_width_update)
         control_layout.addWidget(self.box_width_slider)
 
-        control_layout.addSpacing(20)
+        control_layout.addSpacing(15)
+
+        self.particle_size_label = QLabel("<b>Particle Size: 50%</b>")
+        control_layout.addWidget(self.particle_size_label)
+        self.particle_size_slider = QSlider(Qt.Horizontal)
+        self.particle_size_slider.setMinimum(0)
+        self.particle_size_slider.setMaximum(100)
+        self.particle_size_slider.setValue(50)
+        self.particle_size_slider.setFixedWidth(100)
+        self.particle_size_slider.valueChanged.connect(self.handle_particle_size_update)
+        control_layout.addWidget(self.particle_size_slider)
+
+        control_layout.addSpacing(15)
         
-        self.opacity_label_A = QLabel("<b>Volume A Opacity: 1.00</b>")
+        # DUAL OPACITY CONTROLS RESTORED & ADAPTED FOR COMPOSITING
+        self.opacity_label_A = QLabel("<b>Vol A Opacity: 1.00</b>")
         control_layout.addWidget(self.opacity_label_A)
         self.opacity_slider_A = QSlider(Qt.Horizontal)
         self.opacity_slider_A.setMinimum(0)
         self.opacity_slider_A.setMaximum(100)
         self.opacity_slider_A.setValue(100)
-        self.opacity_slider_A.setFixedWidth(110)
+        self.opacity_slider_A.setFixedWidth(100)
         self.opacity_slider_A.valueChanged.connect(self.handle_opacity_A_change)
         control_layout.addWidget(self.opacity_slider_A)
-        
+
         control_layout.addSpacing(15)
-        
-        self.opacity_label_B = QLabel("<b>Volume B Opacity: 1.00</b>")
+
+        self.opacity_label_B = QLabel("<b>Vol B Opacity: 1.00</b>")
         control_layout.addWidget(self.opacity_label_B)
         self.opacity_slider_B = QSlider(Qt.Horizontal)
         self.opacity_slider_B.setMinimum(0)
         self.opacity_slider_B.setMaximum(100)
         self.opacity_slider_B.setValue(100)
-        self.opacity_slider_B.setFixedWidth(110)
+        self.opacity_slider_B.setFixedWidth(100)
         self.opacity_slider_B.valueChanged.connect(self.handle_opacity_B_change)
         control_layout.addWidget(self.opacity_slider_B)
         
@@ -147,24 +173,28 @@ class FullHeightmapViewer(QMainWindow):
         self.renderer = vtk.vtkRenderer()
         self.renderer.SetBackground(0.08, 0.09, 0.1)
 
-        # UNIFIED SOLID LOOKUP TABLES
+        render_win = self.vtkWidget.GetRenderWindow()
+        render_win.SetAlphaBitPlanes(1)
+        render_win.SetMultiSamples(0)
+        self.renderer.SetUseDepthPeeling(1)
+        self.renderer.SetOcclusionRatio(0.0)
+        self.renderer.SetMaximumNumberOfPeels(4)
+
+        self.lut_diff = vtk.vtkLookupTable()
+        self.lut_diff.SetNumberOfTableValues(2)
+        self.lut_diff.SetTableValue(0, 0.9, 0.2, 0.2, 1.0)
+        self.lut_diff.SetTableValue(1, 0.2, 0.5, 0.9, 1.0) 
+        self.lut_diff.Build()
+
         self.lut_A = vtk.vtkLookupTable()
         self.lut_A.SetNumberOfTableValues(1)
-        self.lut_A.SetTableValue(0, 0.9, 0.6, 0.1, 1.0) # Solid Gold/Orange for Volume A
+        self.lut_A.SetTableValue(0, 0.9, 0.6, 0.1, 1.0)
         self.lut_A.Build()
 
         self.lut_B = vtk.vtkLookupTable()
         self.lut_B.SetNumberOfTableValues(1)
-        self.lut_B.SetTableValue(0, 0.1, 0.6, 0.9, 1.0) # Solid Light Blue for Volume B
+        self.lut_B.SetTableValue(0, 0.1, 0.6, 0.9, 1.0)
         self.lut_B.Build()
-
-        self.lut_diff = vtk.vtkLookupTable()
-        self.lut_diff.SetNumberOfTableValues(2)
-        # Index 0 (Negative difference values -> Volume B is greater)
-        self.lut_diff.SetTableValue(0, 0.9, 0.2, 0.2, 1.0) # Pure solid Red
-        # Index 1 (Positive difference values -> Volume A is greater)
-        self.lut_diff.SetTableValue(1, 0.2, 0.5, 0.9, 1.0) # Pure solid Blue
-        self.lut_diff.Build()
 
         self.actor_A = vtk.vtkActor()
         self.actor_B = vtk.vtkActor()
@@ -179,28 +209,101 @@ class FullHeightmapViewer(QMainWindow):
         self.renderer.AddActor(self.actor_B)
         self.renderer.AddActor(self.actor_diff)
 
-        vtk_node_pts = vtk.vtkPoints()
-        for pt in center_coords:
-            vtk_node_pts.InsertNextPoint(pt[0], pt[1], pt[2])
-        poly_nodes = vtk.vtkPolyData()
-        poly_nodes.SetPoints(vtk_node_pts)
-        glyph = vtk.vtkVertexGlyphFilter()
-        glyph.SetInputData(poly_nodes)
-        glyph.Update()
-        mapper_nodes = vtk.vtkPolyDataMapper()
-        mapper_nodes.SetInputConnection(glyph.GetOutputPort())
-        actor_nodes = vtk.vtkActor()
-        actor_nodes.SetMapper(mapper_nodes)
-        actor_nodes.GetProperty().SetColor(0.5, 0.55, 0.6)
-        actor_nodes.GetProperty().SetPointSize(3.0)
-        actor_nodes.GetProperty().LightingOff()
-        self.renderer.AddActor(actor_nodes)
+        self.poly_nodes = vtk.vtkPolyData()
+        self.glyph_filter = vtk.vtkGlyph3D()
+        self.actor_nodes = vtk.vtkActor()
+        self.setup_difference_particle_pipeline()
 
         self.vtkWidget.GetRenderWindow().AddRenderer(self.renderer)
         self.vtkWidget.Initialize()
         self.vtkWidget.SetInteractorStyle(vtk.vtkInteractorStyleTrackballCamera())
 
+        self.mode_dropdown.setCurrentIndex(1)
         self.handle_axis_switch(0)
+
+    def setup_difference_particle_pipeline(self):
+        vtk_node_pts = vtk.vtkPoints()
+        for pt in self.center_coords:
+            vtk_node_pts.InsertNextPoint(pt[0], pt[1], pt[2])
+        self.poly_nodes.SetPoints(vtk_node_pts)
+
+        self.glyph_filter.SetInputData(self.poly_nodes)
+
+        sphere = vtk.vtkSphereSource()
+        sphere.SetRadius(1.0)
+        sphere.SetThetaResolution(14)
+        sphere.SetPhiResolution(14)
+        sphere.Update()
+
+        self.glyph_filter.SetSourceConnection(sphere.GetOutputPort())
+        self.glyph_filter.SetScaleModeToScaleByVector()
+        self.glyph_filter.SetColorModeToColorByScalar()
+
+        self.update_particle_pipeline_arrays()
+
+        self.mapper_nodes = vtk.vtkPolyDataMapper()
+        self.mapper_nodes.SetInputConnection(self.glyph_filter.GetOutputPort())
+        self.mapper_nodes.SetLookupTable(self.lut_diff)
+        self.mapper_nodes.SetScalarRange(-1.0, 1.0)
+
+        self.actor_nodes.SetMapper(self.mapper_nodes)
+        self.actor_nodes.GetProperty().LightingOn()
+        self.actor_nodes.GetProperty().SetAmbient(0.3)
+        self.actor_nodes.GetProperty().SetDiffuse(0.7)
+        
+        self.mapper_nodes.SetResolveCoincidentTopologyToPolygonOffset()
+        self.mapper_nodes.SetResolveCoincidentTopologyPolygonOffsetParameters(1.0, 1.0)
+
+        self.renderer.AddActor(self.actor_nodes)
+
+    def update_particle_pipeline_arrays(self):
+        mode_idx = self.mode_dropdown.currentIndex()
+        size_pct = self.particle_size_slider.value() / 100.0
+        current_max_scale = self.max_safe_particle_radius * (size_pct * 3.0)
+
+        size_vectors = vtk.vtkFloatArray()
+        size_vectors.SetNumberOfComponents(3)
+        size_vectors.SetNumberOfTuples(len(self.center_coords))
+
+        color_scalars = vtk.vtkFloatArray()
+        color_scalars.SetNumberOfValues(len(self.center_coords))
+
+        diff = self.weights_A - self.weights_B
+        max_diff = np.max(np.abs(diff)) or 1.0
+        is_dev_mode = self.diff_toggle.isChecked()
+
+        if mode_idx == 1 and is_dev_mode:
+            for i, val in enumerate(diff):
+                norm_size = (abs(val) / max_diff) * current_max_scale
+                norm_size = max(0.02, norm_size)
+                size_vectors.SetTuple3(i, norm_size, norm_size, norm_size)
+                color_scalars.SetValue(i, -0.5 if val >= 0 else 0.5)
+        else:
+            for i in range(len(self.center_coords)):
+                norm_size = max(0.05, current_max_scale * 0.3)
+                size_vectors.SetTuple3(i, norm_size, norm_size, norm_size)
+                color_scalars.SetValue(i, 0.0)
+
+        self.poly_nodes.GetPointData().SetVectors(size_vectors)
+        self.poly_nodes.GetPointData().SetScalars(color_scalars)
+        
+        self.poly_nodes.Modified()
+        self.glyph_filter.Update()
+
+    def handle_diff_toggle_change(self, state):
+        self.update_particle_pipeline_arrays()
+        if self.mode_dropdown.currentIndex() == 1:
+            if self.diff_toggle.isChecked():
+                self.mapper_nodes.ScalarVisibilityOn()
+            else:
+                self.mapper_nodes.ScalarVisibilityOff()
+                self.actor_nodes.GetProperty().SetColor(1.0, 1.0, 1.0)
+        self.vtkWidget.GetRenderWindow().Render()
+
+    def handle_particle_size_update(self, value):
+        self.particle_size_label.setText(f"<b>Particle Size: {int(value)}%</b>")
+        self.update_particle_pipeline_arrays()
+        self.vtkWidget.GetRenderWindow().Render()
 
     def get_physical_box_width(self, axis_idx):
         rem_axes = [i for i in [0, 1, 2] if i != axis_idx]
@@ -271,7 +374,7 @@ class FullHeightmapViewer(QMainWindow):
         else:
             base_h_plane = safe_clearance_plane
 
-        bar_thickness_ratio = 1.00
+        bar_thickness_ratio = 1.0
         size_u = box_width * bar_thickness_ratio
         size_v = box_width * bar_thickness_ratio
 
@@ -291,14 +394,13 @@ class FullHeightmapViewer(QMainWindow):
                 bar_height = max(0.2, bar_height) 
 
                 if is_diff:
-                    # Binary color logic map: negative index maps to 0 (Red), positive maps to 1 (Blue)
                     val_scalar = -0.5 if avg_value < 0 else 0.5
                     if avg_value < 0:
                         h_center = base_h_plane - (bar_height / 2.0)
                     else:
                         h_center = base_h_plane + (bar_height / 2.0)
                 else:
-                    val_scalar = 0.0 # Maps to standard locked single value index
+                    val_scalar = 0.0
                     h_center = base_h_plane + (bar_height / 2.0)
 
                 has_geometry = True
@@ -402,33 +504,49 @@ class FullHeightmapViewer(QMainWindow):
 
     def handle_mode_switch(self, index):
         if index == 0:
+            self.diff_toggle.setVisible(False)
+            self.diff_toggle.setEnabled(False)
+
             self.actor_A.SetVisibility(True)
             self.actor_B.SetVisibility(True)
             self.actor_diff.SetVisibility(False)
             
+            self.mapper_nodes.ScalarVisibilityOff()
+            self.actor_nodes.GetProperty().SetColor(1.0, 1.0, 1.0)
+            
             self.opacity_slider_B.setVisible(True)
             self.opacity_label_B.setVisible(True)
-            self.opacity_label_A.setText(f"<b>Volume A Opacity: {self.opacity_slider_A.value()/100.0:.2f}</b>")
+            self.opacity_label_A.setText(f"<b>Vol A Opacity: {self.opacity_slider_A.value()/100.0:.2f}</b>")
+            self.opacity_label_B.setText(f"<b>Vol B Opacity: {self.opacity_slider_B.value()/100.0:.2f}</b>")
             
             self.actor_A.GetProperty().SetOpacity(self.opacity_slider_A.value() / 100.0)
             self.actor_B.GetProperty().SetOpacity(self.opacity_slider_B.value() / 100.0)
         else:
+            self.diff_toggle.setVisible(True)
+            self.diff_toggle.setEnabled(True)
+
             self.actor_A.SetVisibility(False)
             self.actor_B.SetVisibility(False)
             self.actor_diff.SetVisibility(True)
             
+            if self.diff_toggle.isChecked():
+                self.mapper_nodes.ScalarVisibilityOn()
+            else:
+                self.mapper_nodes.ScalarVisibilityOff()
+                self.actor_nodes.GetProperty().SetColor(1.0, 1.0, 1.0)
+            
             self.opacity_slider_B.setVisible(False)
             self.opacity_label_B.setVisible(False)
             self.opacity_label_A.setText(f"<b>Diff Opacity: {self.opacity_slider_A.value()/100.0:.2f}</b>")
-            
             self.actor_diff.GetProperty().SetOpacity(self.opacity_slider_A.value() / 100.0)
 
+        self.update_particle_pipeline_arrays()
         self.reset_camera_to_full_volume()
 
     def handle_opacity_A_change(self, value):
         alpha = value / 100.0
         if self.mode_dropdown.currentIndex() == 0:
-            self.opacity_label_A.setText(f"<b>Volume A Opacity: {alpha:.2f}</b>")
+            self.opacity_label_A.setText(f"<b>Vol A Opacity: {alpha:.2f}</b>")
             if self.actor_A: self.actor_A.GetProperty().SetOpacity(alpha)
         else:
             self.opacity_label_A.setText(f"<b>Diff Opacity: {alpha:.2f}</b>")
@@ -438,7 +556,7 @@ class FullHeightmapViewer(QMainWindow):
     def handle_opacity_B_change(self, value):
         alpha = value / 100.0
         if self.mode_dropdown.currentIndex() == 0:
-            self.opacity_label_B.setText(f"<b>Volume B Opacity: {alpha:.2f}</b>")
+            self.opacity_label_B.setText(f"<b>Vol B Opacity: {alpha:.2f}</b>")
             if self.actor_B: self.actor_B.GetProperty().SetOpacity(alpha)
         self.vtkWidget.GetRenderWindow().Render()
 

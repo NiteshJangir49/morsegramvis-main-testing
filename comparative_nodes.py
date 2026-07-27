@@ -4,10 +4,14 @@ import numpy as np
 import pandas as pd
 import sys
 
-from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QComboBox, QCheckBox
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+    QLabel, QSlider, QComboBox, QCheckBox
+)
 from PySide6.QtCore import Qt
 import vtkmodules.all as vtk
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+
 
 def load_dual_node_volume_data(particles_csv, node_vtp_path_A, node_vtp_path_B):
     if not os.path.exists(particles_csv) or not os.path.exists(node_vtp_path_A) or not os.path.exists(node_vtp_path_B):
@@ -56,14 +60,21 @@ def load_dual_node_volume_data(particles_csv, node_vtp_path_A, node_vtp_path_B):
 
 
 class FullHeightmapViewer(QMainWindow):
-    def __init__(self, center_coords, weights_A, weights_B):
+    def __init__(self, center_coords, weights_A, weights_B, base_dir=None):
         super().__init__()
-        self.setWindowTitle("Histogram Heightmap Viewer")
-        self.setGeometry(100, 100, 1500, 850)
+        self.setWindowTitle("DiffSeer View - Spatial Volume & Difference Viewer")
+        self.setGeometry(100, 100, 1600, 850)
 
         self.center_coords = center_coords
         self.weights_A = weights_A
         self.weights_B = weights_B
+        self.base_dir = base_dir
+        
+        self.bd_grains_dir = os.path.join(base_dir, "dataset_files", "Steel Beads", "bd_grains") if base_dir else None
+
+        self.vtp_surface_points = None
+        self.vtp_weights_A = None
+        self.vtp_weights_B = None
 
         self.min_coords = center_coords.min(axis=0)
         self.max_coords = center_coords.max(axis=0)
@@ -90,7 +101,18 @@ class FullHeightmapViewer(QMainWindow):
         
         control_layout.addSpacing(15)
 
-        self.diff_toggle = QCheckBox("Colored particles")
+        control_layout.addWidget(QLabel("<b>Histogram Source:</b>"))
+        self.hist_source_combo = QComboBox()
+        self.hist_source_combo.addItems([
+            "Centroids",
+            "Volume"
+        ])
+        self.hist_source_combo.currentIndexChanged.connect(self.handle_hist_source_switch)
+        control_layout.addWidget(self.hist_source_combo)
+
+        control_layout.addSpacing(15)
+
+        self.diff_toggle = QCheckBox("Volume Difference View")
         self.diff_toggle.setChecked(True)
         self.diff_toggle.stateChanged.connect(self.handle_diff_toggle_change)
         control_layout.addWidget(self.diff_toggle)
@@ -111,7 +133,7 @@ class FullHeightmapViewer(QMainWindow):
         self.height_slider.setMinimum(0)   
         self.height_slider.setMaximum(100)  
         self.height_slider.setValue(20)   
-        self.height_slider.setFixedWidth(100)
+        self.height_slider.setFixedWidth(80)
         self.height_slider.valueChanged.connect(self.handle_geometry_update)
         control_layout.addWidget(self.height_slider)
 
@@ -123,7 +145,7 @@ class FullHeightmapViewer(QMainWindow):
         self.box_width_slider.setMinimum(0)   
         self.box_width_slider.setMaximum(100)  
         self.box_width_slider.setValue(15)   
-        self.box_width_slider.setFixedWidth(100)
+        self.box_width_slider.setFixedWidth(80)
         self.box_width_slider.valueChanged.connect(self.handle_box_width_update)
         control_layout.addWidget(self.box_width_slider)
 
@@ -135,20 +157,19 @@ class FullHeightmapViewer(QMainWindow):
         self.particle_size_slider.setMinimum(0)
         self.particle_size_slider.setMaximum(100)
         self.particle_size_slider.setValue(50)
-        self.particle_size_slider.setFixedWidth(100)
+        self.particle_size_slider.setFixedWidth(80)
         self.particle_size_slider.valueChanged.connect(self.handle_particle_size_update)
         control_layout.addWidget(self.particle_size_slider)
 
         control_layout.addSpacing(15)
         
-        # DUAL OPACITY CONTROLS RESTORED & ADAPTED FOR COMPOSITING
         self.opacity_label_A = QLabel("<b>Vol A Opacity: 1.00</b>")
         control_layout.addWidget(self.opacity_label_A)
         self.opacity_slider_A = QSlider(Qt.Horizontal)
         self.opacity_slider_A.setMinimum(0)
         self.opacity_slider_A.setMaximum(100)
         self.opacity_slider_A.setValue(100)
-        self.opacity_slider_A.setFixedWidth(100)
+        self.opacity_slider_A.setFixedWidth(80)
         self.opacity_slider_A.valueChanged.connect(self.handle_opacity_A_change)
         control_layout.addWidget(self.opacity_slider_A)
 
@@ -160,7 +181,7 @@ class FullHeightmapViewer(QMainWindow):
         self.opacity_slider_B.setMinimum(0)
         self.opacity_slider_B.setMaximum(100)
         self.opacity_slider_B.setValue(100)
-        self.opacity_slider_B.setFixedWidth(100)
+        self.opacity_slider_B.setFixedWidth(80)
         self.opacity_slider_B.valueChanged.connect(self.handle_opacity_B_change)
         control_layout.addWidget(self.opacity_slider_B)
         
@@ -182,7 +203,7 @@ class FullHeightmapViewer(QMainWindow):
 
         self.lut_diff = vtk.vtkLookupTable()
         self.lut_diff.SetNumberOfTableValues(2)
-        self.lut_diff.SetTableValue(0, 0.9, 0.2, 0.2, 1.0)
+        self.lut_diff.SetTableValue(0, 0.9, 0.2, 0.2, 1.0) 
         self.lut_diff.SetTableValue(1, 0.2, 0.5, 0.9, 1.0) 
         self.lut_diff.Build()
 
@@ -212,6 +233,8 @@ class FullHeightmapViewer(QMainWindow):
         self.poly_nodes = vtk.vtkPolyData()
         self.glyph_filter = vtk.vtkGlyph3D()
         self.actor_nodes = vtk.vtkActor()
+        self.renderer.AddActor(self.actor_nodes)
+
         self.setup_difference_particle_pipeline()
 
         self.vtkWidget.GetRenderWindow().AddRenderer(self.renderer)
@@ -221,12 +244,181 @@ class FullHeightmapViewer(QMainWindow):
         self.mode_dropdown.setCurrentIndex(1)
         self.handle_axis_switch(0)
 
-    def setup_difference_particle_pipeline(self):
-        vtk_node_pts = vtk.vtkPoints()
-        for pt in self.center_coords:
-            vtk_node_pts.InsertNextPoint(pt[0], pt[1], pt[2])
-        self.poly_nodes.SetPoints(vtk_node_pts)
+    def load_full_grain_ensemble_backend(self):
+        """Loads raw grain points in the backend to drive fine-grained heightmaps."""
+        if not self.bd_grains_dir or not os.path.exists(self.bd_grains_dir):
+            print(f"[Error] Grain directory missing: {self.bd_grains_dir}")
+            return
 
+        vtp_files = sorted([
+            os.path.join(self.bd_grains_dir, f) 
+            for f in os.listdir(self.bd_grains_dir) 
+            if f.endswith(".vtp")
+        ])
+
+        num_particles = min(len(self.center_coords), len(self.weights_A), len(vtp_files))
+        if num_particles == 0:
+            return
+
+        print(f"[Backend Data Sync] Loading backend point-cloud arrays across {num_particles} grains...")
+
+        all_pts = []
+        wA_list = []
+        wB_list = []
+
+        for i in range(num_particles):
+            wA = self.weights_A[i]
+            wB = self.weights_B[i]
+
+            reader = vtk.vtkXMLPolyDataReader()
+            reader.SetFileName(vtp_files[i])
+            reader.Update()
+            poly = reader.GetOutput()
+
+            if not poly or poly.GetNumberOfPoints() == 0:
+                continue
+
+            n_pts = poly.GetNumberOfPoints()
+            for p in range(n_pts):
+                all_pts.append(poly.GetPoint(p))
+                wA_list.append(wA)
+                wB_list.append(wB)
+
+        self.vtp_surface_points = np.array(all_pts)
+        self.vtp_weights_A = np.array(wA_list)
+        self.vtp_weights_B = np.array(wB_list)
+
+        print(f"[Backend Data Sync] Loaded {len(all_pts)} dense sampling points for full-ensemble heightmaps.")
+
+    def handle_hist_source_switch(self, index):
+        if index == 1 and self.vtp_surface_points is None:
+            self.load_full_grain_ensemble_backend()
+
+        self.handle_geometry_update()
+
+    def get_active_dataset_source(self, is_diff=False, requested_weights=None):
+        if self.hist_source_combo.currentIndex() == 1 and self.vtp_surface_points is not None:
+            coords = self.vtp_surface_points
+            if is_diff:
+                active_weights = self.vtp_weights_A - self.vtp_weights_B
+            else:
+                active_weights = self.vtp_weights_A if np.array_equal(requested_weights, self.weights_A) else self.vtp_weights_B
+        else:
+            coords = self.center_coords
+            if is_diff:
+                active_weights = self.weights_A - self.weights_B
+            else:
+                active_weights = requested_weights
+
+        return coords, active_weights
+
+    def generate_spatial_histogram_mesh(self, weights, axis_idx, lut, scale, is_diff=False):
+        rem_axes = [i for i in [0, 1, 2] if i != axis_idx]
+        u_ax, v_ax = rem_axes[0], rem_axes[1]
+
+        coords, active_weights = self.get_active_dataset_source(is_diff=is_diff, requested_weights=weights)
+
+        min_u, max_u = self.min_coords[u_ax], self.max_coords[u_ax]
+        min_v, max_v = self.min_coords[v_ax], self.max_coords[v_ax]
+
+        box_width = self.get_physical_box_width(axis_idx)
+        slider_val = self.box_width_slider.value()
+
+        if slider_val == 100:
+            grid_res_u, grid_res_v = 1, 1
+            max_u = min_u + box_width
+            max_v = min_v + box_width
+        else:
+            grid_res_u = max(2, int(np.ceil((max_u - min_u) / box_width)))
+            grid_res_v = max(2, int(np.ceil((max_v - min_v) / box_width)))
+            max_u = min_u + (grid_res_u * box_width)
+            max_v = min_v + (grid_res_v * box_width)
+
+        bin_contents = [[[] for _ in range(grid_res_v)] for _ in range(grid_res_u)]
+        for pt, w in zip(coords, active_weights):
+            if slider_val == 100:
+                iu, iv = 0, 0
+            else:
+                if pt[u_ax] < min_u or pt[u_ax] >= max_u or pt[v_ax] < min_v or pt[v_ax] >= max_v:
+                    continue
+                iu = int((pt[u_ax] - min_u) / box_width)
+                iv = int((pt[v_ax] - min_v) / box_width)
+                iu = min(iu, grid_res_u - 1)
+                iv = min(iv, grid_res_v - 1)
+            
+            if is_diff and abs(w) < 1e-4:
+                continue
+            bin_contents[iu][iv].append(w)
+
+        append_filter = vtk.vtkAppendPolyData()
+        has_geometry = False
+
+        global_min_w = active_weights.min() if len(active_weights) > 0 else 0.0
+        global_max_w = active_weights.max() if len(active_weights) > 0 else 1.0
+        max_abs = max(abs(global_min_w), abs(global_max_w)) or 1.0
+
+        safe_clearance_plane = self.max_coords[axis_idx] + 2.0
+        
+        if is_diff:
+            max_possible_height = scale * 10.0
+            base_h_plane = safe_clearance_plane + max_possible_height
+        else:
+            base_h_plane = safe_clearance_plane
+
+        bar_thickness_ratio = 1.0
+        size_u = box_width * bar_thickness_ratio
+        size_v = box_width * bar_thickness_ratio
+
+        for iu in range(grid_res_u):
+            u_center = (self.min_coords[u_ax] + self.max_coords[u_ax]) / 2.0 if slider_val == 100 else min_u + (iu + 0.5) * box_width
+                
+            for iv in range(grid_res_v):
+                v_center = (self.min_coords[v_ax] + self.max_coords[v_ax]) / 2.0 if slider_val == 100 else min_v + (iv + 0.5) * box_width
+                    
+                cell_weights = np.array(bin_contents[iu][iv])
+                if len(cell_weights) == 0: continue
+
+                avg_value = np.mean(cell_weights)
+                if abs(avg_value) < 1e-4: continue
+
+                bar_height = abs(avg_value / max_abs) * scale * 10.0 if is_diff else ((avg_value - global_min_w) / max(1e-5, (global_max_w - global_min_w))) * scale * 10.0
+                bar_height = max(0.2, bar_height) 
+
+                if is_diff:
+                    val_scalar = -0.5 if avg_value < 0 else 0.5
+                    if avg_value < 0:
+                        h_center = base_h_plane - (bar_height / 2.0)
+                    else:
+                        h_center = base_h_plane + (bar_height / 2.0)
+                else:
+                    val_scalar = 0.0
+                    h_center = base_h_plane + (bar_height / 2.0)
+
+                has_geometry = True
+                poly_box = self.make_cube_geometry(u_center, v_center, h_center, size_u, size_v, bar_height, val_scalar, u_ax, v_ax, axis_idx)
+                append_filter.AddInputData(poly_box)
+
+        poly_data = vtk.vtkPolyData()
+        if has_geometry:
+            append_filter.Update()
+            poly_data.ShallowCopy(append_filter.GetOutput())
+
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(poly_data)
+        mapper.ScalarVisibilityOn()
+        mapper.SetLookupTable(lut)
+        
+        if is_diff:
+            mapper.SetScalarRange(-1.0, 1.0)
+        else:
+            mapper.SetScalarRange(0.0, 1.0)
+        
+        mapper.SetResolveCoincidentTopologyToPolygonOffset()
+        mapper.SetResolveCoincidentTopologyPolygonOffsetParameters(1.0, 1.0)
+        
+        return mapper
+
+    def setup_difference_particle_pipeline(self):
         self.glyph_filter.SetInputData(self.poly_nodes)
 
         sphere = vtk.vtkSphereSource()
@@ -238,8 +430,6 @@ class FullHeightmapViewer(QMainWindow):
         self.glyph_filter.SetSourceConnection(sphere.GetOutputPort())
         self.glyph_filter.SetScaleModeToScaleByVector()
         self.glyph_filter.SetColorModeToColorByScalar()
-
-        self.update_particle_pipeline_arrays()
 
         self.mapper_nodes = vtk.vtkPolyDataMapper()
         self.mapper_nodes.SetInputConnection(self.glyph_filter.GetOutputPort())
@@ -254,11 +444,18 @@ class FullHeightmapViewer(QMainWindow):
         self.mapper_nodes.SetResolveCoincidentTopologyToPolygonOffset()
         self.mapper_nodes.SetResolveCoincidentTopologyPolygonOffsetParameters(1.0, 1.0)
 
-        self.renderer.AddActor(self.actor_nodes)
+        self.update_particle_pipeline_arrays()
 
     def update_particle_pipeline_arrays(self):
+        """Updates particle sphere colors and radii with clean zero-scale collapsing."""
+        vtk_node_pts = vtk.vtkPoints()
+        for pt in self.center_coords:
+            vtk_node_pts.InsertNextPoint(pt[0], pt[1], pt[2])
+        self.poly_nodes.SetPoints(vtk_node_pts)
+
         mode_idx = self.mode_dropdown.currentIndex()
-        size_pct = self.particle_size_slider.value() / 100.0
+        slider_val = self.particle_size_slider.value()
+        size_pct = slider_val / 100.0
         current_max_scale = self.max_safe_particle_radius * (size_pct * 3.0)
 
         size_vectors = vtk.vtkFloatArray()
@@ -273,14 +470,26 @@ class FullHeightmapViewer(QMainWindow):
         is_dev_mode = self.diff_toggle.isChecked()
 
         if mode_idx == 1 and is_dev_mode:
+            self.mapper_nodes.ScalarVisibilityOn()
             for i, val in enumerate(diff):
-                norm_size = (abs(val) / max_diff) * current_max_scale
-                norm_size = max(0.02, norm_size)
+                if slider_val == 0:
+                    norm_size = 0.0  
+                else:
+                    norm_size = (abs(val) / max_diff) * current_max_scale
+                    norm_size = max(0.02, norm_size)  
+                
                 size_vectors.SetTuple3(i, norm_size, norm_size, norm_size)
                 color_scalars.SetValue(i, -0.5 if val >= 0 else 0.5)
         else:
+            self.mapper_nodes.ScalarVisibilityOff()
+            self.actor_nodes.GetProperty().SetColor(1.0, 1.0, 1.0)
+            
             for i in range(len(self.center_coords)):
-                norm_size = max(0.05, current_max_scale * 0.3)
+                if slider_val == 0:
+                    norm_size = 0.0  
+                else:
+                    norm_size = max(0.05, current_max_scale * 0.3)
+                
                 size_vectors.SetTuple3(i, norm_size, norm_size, norm_size)
                 color_scalars.SetValue(i, 0.0)
 
@@ -322,110 +531,6 @@ class FullHeightmapViewer(QMainWindow):
     def get_mapped_height_scale(self):
         slider_pct = self.height_slider.value() / 100.0
         return 0.5 + (slider_pct * 39.5)
-
-    def generate_spatial_histogram_mesh(self, weights, axis_idx, lut, scale, is_diff=False):
-        rem_axes = [i for i in [0, 1, 2] if i != axis_idx]
-        u_ax, v_ax = rem_axes[0], rem_axes[1]
-
-        min_u, max_u = self.min_coords[u_ax], self.max_coords[u_ax]
-        min_v, max_v = self.min_coords[v_ax], self.max_coords[v_ax]
-
-        box_width = self.get_physical_box_width(axis_idx)
-        slider_val = self.box_width_slider.value()
-
-        if slider_val == 100:
-            grid_res_u, grid_res_v = 1, 1
-            max_u = min_u + box_width
-            max_v = min_v + box_width
-        else:
-            grid_res_u = max(2, int(np.ceil((max_u - min_u) / box_width)))
-            grid_res_v = max(2, int(np.ceil((max_v - min_v) / box_width)))
-            max_u = min_u + (grid_res_u * box_width)
-            max_v = min_v + (grid_res_v * box_width)
-
-        bin_contents = [[[] for _ in range(grid_res_v)] for _ in range(grid_res_u)]
-        for pt, w in zip(self.center_coords, weights):
-            if slider_val == 100:
-                iu, iv = 0, 0
-            else:
-                if pt[u_ax] < min_u or pt[u_ax] >= max_u or pt[v_ax] < min_v or pt[v_ax] >= max_v:
-                    continue
-                iu = int((pt[u_ax] - min_u) / box_width)
-                iv = int((pt[v_ax] - min_v) / box_width)
-                iu = min(iu, grid_res_u - 1)
-                iv = min(iv, grid_res_v - 1)
-            
-            if is_diff and abs(w) < 1e-4:
-                continue
-            bin_contents[iu][iv].append(w)
-
-        append_filter = vtk.vtkAppendPolyData()
-        has_geometry = False
-
-        global_min_w = weights.min()
-        global_max_w = weights.max()
-        max_abs = max(abs(global_min_w), abs(global_max_w)) or 1.0
-
-        safe_clearance_plane = self.max_coords[axis_idx] + 2.0
-        
-        if is_diff:
-            max_possible_height = scale * 10.0
-            base_h_plane = safe_clearance_plane + max_possible_height
-        else:
-            base_h_plane = safe_clearance_plane
-
-        bar_thickness_ratio = 1.0
-        size_u = box_width * bar_thickness_ratio
-        size_v = box_width * bar_thickness_ratio
-
-        for iu in range(grid_res_u):
-            u_center = (self.min_coords[u_ax] + self.max_coords[u_ax]) / 2.0 if slider_val == 100 else min_u + (iu + 0.5) * box_width
-                
-            for iv in range(grid_res_v):
-                v_center = (self.min_coords[v_ax] + self.max_coords[v_ax]) / 2.0 if slider_val == 100 else min_v + (iv + 0.5) * box_width
-                    
-                cell_weights = np.array(bin_contents[iu][iv])
-                if len(cell_weights) == 0: continue
-
-                avg_value = np.mean(cell_weights)
-                if abs(avg_value) < 1e-4: continue
-
-                bar_height = abs(avg_value / max_abs) * scale * 10.0 if is_diff else ((avg_value - global_min_w) / (global_max_w - global_min_w)) * scale * 10.0
-                bar_height = max(0.2, bar_height) 
-
-                if is_diff:
-                    val_scalar = -0.5 if avg_value < 0 else 0.5
-                    if avg_value < 0:
-                        h_center = base_h_plane - (bar_height / 2.0)
-                    else:
-                        h_center = base_h_plane + (bar_height / 2.0)
-                else:
-                    val_scalar = 0.0
-                    h_center = base_h_plane + (bar_height / 2.0)
-
-                has_geometry = True
-                poly_box = self.make_cube_geometry(u_center, v_center, h_center, size_u, size_v, bar_height, val_scalar, u_ax, v_ax, axis_idx)
-                append_filter.AddInputData(poly_box)
-
-        poly_data = vtk.vtkPolyData()
-        if has_geometry:
-            append_filter.Update()
-            poly_data.ShallowCopy(append_filter.GetOutput())
-
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(poly_data)
-        mapper.ScalarVisibilityOn()
-        mapper.SetLookupTable(lut)
-        
-        if is_diff:
-            mapper.SetScalarRange(-1.0, 1.0)
-        else:
-            mapper.SetScalarRange(0.0, 1.0)
-        
-        mapper.SetResolveCoincidentTopologyToPolygonOffset()
-        mapper.SetResolveCoincidentTopologyPolygonOffsetParameters(1.0, 1.0)
-        
-        return mapper
 
     def make_cube_geometry(self, uc, vc, hc, su, sv, sh, scalar_val, u_ax, v_ax, axis_idx):
         cube = vtk.vtkCubeSource()
@@ -511,9 +616,6 @@ class FullHeightmapViewer(QMainWindow):
             self.actor_B.SetVisibility(True)
             self.actor_diff.SetVisibility(False)
             
-            self.mapper_nodes.ScalarVisibilityOff()
-            self.actor_nodes.GetProperty().SetColor(1.0, 1.0, 1.0)
-            
             self.opacity_slider_B.setVisible(True)
             self.opacity_label_B.setVisible(True)
             self.opacity_label_A.setText(f"<b>Vol A Opacity: {self.opacity_slider_A.value()/100.0:.2f}</b>")
@@ -528,12 +630,6 @@ class FullHeightmapViewer(QMainWindow):
             self.actor_A.SetVisibility(False)
             self.actor_B.SetVisibility(False)
             self.actor_diff.SetVisibility(True)
-            
-            if self.diff_toggle.isChecked():
-                self.mapper_nodes.ScalarVisibilityOn()
-            else:
-                self.mapper_nodes.ScalarVisibilityOff()
-                self.actor_nodes.GetProperty().SetColor(1.0, 1.0, 1.0)
             
             self.opacity_slider_B.setVisible(False)
             self.opacity_label_B.setVisible(False)
@@ -574,7 +670,7 @@ def main():
         return
 
     app = QApplication(sys.argv)
-    viewer = FullHeightmapViewer(center_coords, w_A, w_B)
+    viewer = FullHeightmapViewer(center_coords, w_A, w_B, base_dir=base_dir)
     viewer.show()
     sys.exit(app.exec())
 

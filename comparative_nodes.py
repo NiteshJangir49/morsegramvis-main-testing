@@ -30,7 +30,7 @@ def load_dual_node_volume_data(particles_csv, node_vtp_path_A, node_vtp_path_B):
             center_coords.append([cx, cy, cz])
         except Exception:
             continue
-    center_coords = np.array(center_coords)
+    center_coords = np.array(center_coords, dtype=np.float32)
 
     reader_A = vtk.vtkXMLPolyDataReader()
     reader_A.SetFileName(node_vtp_path_A)
@@ -50,8 +50,8 @@ def load_dual_node_volume_data(particles_csv, node_vtp_path_A, node_vtp_path_B):
     scalars_B = poly_B.GetPointData().GetScalars()
     num_points = scalars_A.GetNumberOfValues()
     
-    weights_A = np.zeros(num_points)
-    weights_B = np.zeros(num_points)
+    weights_A = np.zeros(num_points, dtype=np.float32)
+    weights_B = np.zeros(num_points, dtype=np.float32)
     for i in range(num_points):
         weights_A[i] = scalars_A.GetValue(i)
         weights_B[i] = scalars_B.GetValue(i)
@@ -116,6 +116,13 @@ class FullHeightmapViewer(QMainWindow):
         self.diff_toggle.setChecked(True)
         self.diff_toggle.stateChanged.connect(self.handle_diff_toggle_change)
         control_layout.addWidget(self.diff_toggle)
+
+        control_layout.addSpacing(15)
+
+        self.bbox_toggle = QCheckBox("Show Particle Bounding Box")
+        self.bbox_toggle.setChecked(False)
+        self.bbox_toggle.stateChanged.connect(self.handle_bbox_toggle)
+        control_layout.addWidget(self.bbox_toggle)
 
         control_layout.addSpacing(15)
 
@@ -235,6 +242,20 @@ class FullHeightmapViewer(QMainWindow):
         self.actor_nodes = vtk.vtkActor()
         self.renderer.AddActor(self.actor_nodes)
 
+        # Bounding Box Wireframe Pipeline
+        self.cube_source_bbox = vtk.vtkCubeSource()
+        mapper_bbox = vtk.vtkPolyDataMapper()
+        mapper_bbox.SetInputConnection(self.cube_source_bbox.GetOutputPort())
+
+        self.actor_bbox = vtk.vtkActor()
+        self.actor_bbox.SetMapper(mapper_bbox)
+        self.actor_bbox.GetProperty().SetRepresentationToWireframe()
+        self.actor_bbox.GetProperty().SetColor(0.85, 0.85, 0.85)
+        self.actor_bbox.GetProperty().SetLineWidth(1.5)
+        self.actor_bbox.SetVisibility(False)
+
+        self.renderer.AddActor(self.actor_bbox)
+
         self.setup_difference_particle_pipeline()
 
         self.vtkWidget.GetRenderWindow().AddRenderer(self.renderer)
@@ -244,8 +265,36 @@ class FullHeightmapViewer(QMainWindow):
         self.mode_dropdown.setCurrentIndex(1)
         self.handle_axis_switch(0)
 
+    def get_full_ensemble_bounds(self):
+        """Computes true global spatial min/max bounds across particle surfaces."""
+        if self.vtp_surface_points is None:
+            self.load_full_grain_ensemble_backend()
+
+        if self.vtp_surface_points is not None and len(self.vtp_surface_points) > 0:
+            min_b = self.vtp_surface_points.min(axis=0)
+            max_b = self.vtp_surface_points.max(axis=0)
+        else:
+            r = self.max_safe_particle_radius
+            min_b = self.min_coords - r
+            max_b = self.max_coords + r
+
+        return min_b, max_b
+
+    def handle_bbox_toggle(self, state):
+        is_visible = self.bbox_toggle.isChecked()
+        if is_visible:
+            min_b, max_b = self.get_full_ensemble_bounds()
+            self.cube_source_bbox.SetBounds(
+                min_b[0], max_b[0],
+                min_b[1], max_b[1],
+                min_b[2], max_b[2]
+            )
+            self.cube_source_bbox.Update()
+
+        self.actor_bbox.SetVisibility(is_visible)
+        self.vtkWidget.GetRenderWindow().Render()
+
     def load_full_grain_ensemble_backend(self):
-        """Loads raw grain points in the backend to drive fine-grained heightmaps."""
         if not self.bd_grains_dir or not os.path.exists(self.bd_grains_dir):
             print(f"[Error] Grain directory missing: {self.bd_grains_dir}")
             return
@@ -260,11 +309,13 @@ class FullHeightmapViewer(QMainWindow):
         if num_particles == 0:
             return
 
-        print(f"[Backend Data Sync] Loading backend point-cloud arrays across {num_particles} grains...")
+        print(f"[Backend Data Sync] Loading fast point-cloud arrays across {num_particles} grains...")
 
-        all_pts = []
+        all_pts_list = []
         wA_list = []
         wB_list = []
+
+        from vtkmodules.util.numpy_support import vtk_to_numpy
 
         for i in range(num_particles):
             wA = self.weights_A[i]
@@ -279,16 +330,17 @@ class FullHeightmapViewer(QMainWindow):
                 continue
 
             n_pts = poly.GetNumberOfPoints()
-            for p in range(n_pts):
-                all_pts.append(poly.GetPoint(p))
-                wA_list.append(wA)
-                wB_list.append(wB)
+            pts_np = vtk_to_numpy(poly.GetPoints().GetData())
 
-        self.vtp_surface_points = np.array(all_pts)
-        self.vtp_weights_A = np.array(wA_list)
-        self.vtp_weights_B = np.array(wB_list)
+            all_pts_list.append(pts_np)
+            wA_list.append(np.full(n_pts, wA, dtype=np.float32))
+            wB_list.append(np.full(n_pts, wB, dtype=np.float32))
 
-        print(f"[Backend Data Sync] Loaded {len(all_pts)} dense sampling points for full-ensemble heightmaps.")
+        self.vtp_surface_points = np.vstack(all_pts_list)
+        self.vtp_weights_A = np.concatenate(wA_list)
+        self.vtp_weights_B = np.concatenate(wB_list)
+
+        print(f"[Backend Data Sync] Loaded {len(self.vtp_surface_points)} dense sampling points.")
 
     def handle_hist_source_switch(self, index):
         if index == 1 and self.vtp_surface_points is None:
@@ -318,6 +370,24 @@ class FullHeightmapViewer(QMainWindow):
 
         coords, active_weights = self.get_active_dataset_source(is_diff=is_diff, requested_weights=weights)
 
+        # 1. Filter out empty background space (where both Vol A and Vol B are 0)
+        if self.hist_source_combo.currentIndex() == 1 and self.vtp_surface_points is not None:
+            wA = self.vtp_weights_A
+            wB = self.vtp_weights_B
+        else:
+            wA = self.weights_A
+            wB = self.weights_B
+
+        # Non-empty mask: At least one volume has a non-zero scalar value
+        non_empty_mask = (np.abs(wA) > 1e-6) | (np.abs(wB) > 1e-6)
+
+        # Apply mask to coordinates and weights
+        valid_coords = coords[non_empty_mask]
+        valid_weights = active_weights[non_empty_mask]
+
+        if len(valid_coords) == 0:
+            return vtk.vtkPolyDataMapper()
+
         min_u, max_u = self.min_coords[u_ax], self.max_coords[u_ax]
         min_v, max_v = self.min_coords[v_ax], self.max_coords[v_ax]
 
@@ -334,88 +404,66 @@ class FullHeightmapViewer(QMainWindow):
             max_u = min_u + (grid_res_u * box_width)
             max_v = min_v + (grid_res_v * box_width)
 
-        bin_contents = [[[] for _ in range(grid_res_v)] for _ in range(grid_res_u)]
-        for pt, w in zip(coords, active_weights):
-            if slider_val == 100:
-                iu, iv = 0, 0
-            else:
-                if pt[u_ax] < min_u or pt[u_ax] >= max_u or pt[v_ax] < min_v or pt[v_ax] >= max_v:
-                    continue
-                iu = int((pt[u_ax] - min_u) / box_width)
-                iv = int((pt[v_ax] - min_v) / box_width)
-                iu = min(iu, grid_res_u - 1)
-                iv = min(iv, grid_res_v - 1)
-            
-            if is_diff and abs(w) < 1e-4:
-                continue
-            bin_contents[iu][iv].append(w)
+        u_pts = valid_coords[:, u_ax]
+        v_pts = valid_coords[:, v_ax]
 
-        append_filter = vtk.vtkAppendPolyData()
-        has_geometry = False
+        u_edges = np.linspace(min_u, max_u, grid_res_u + 1)
+        v_edges = np.linspace(min_v, max_v, grid_res_v + 1)
 
-        global_min_w = active_weights.min() if len(active_weights) > 0 else 0.0
-        global_max_w = active_weights.max() if len(active_weights) > 0 else 1.0
+        # 2. Histogram binning now divides ONLY by the count of non-empty points
+        counts, _, _ = np.histogram2d(u_pts, v_pts, bins=[u_edges, v_edges])
+        sums, _, _ = np.histogram2d(u_pts, v_pts, bins=[u_edges, v_edges], weights=valid_weights)
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            avg_grid = np.nan_to_num(sums / counts)
+
+        valid_mask = counts > 0
+        if is_diff:
+            valid_mask = valid_mask & (np.abs(avg_grid) >= 1e-4)
+
+        valid_iu, valid_iv = np.where(valid_mask)
+        if len(valid_iu) == 0:
+            return vtk.vtkPolyDataMapper()
+
+        avg_values = avg_grid[valid_iu, valid_iv]
+
+        global_min_w = valid_weights.min() if len(valid_weights) > 0 else 0.0
+        global_max_w = valid_weights.max() if len(valid_weights) > 0 else 1.0
         max_abs = max(abs(global_min_w), abs(global_max_w)) or 1.0
 
         safe_clearance_plane = self.max_coords[axis_idx] + 2.0
-        
+        base_h_plane = (safe_clearance_plane + (scale * 2.0)) if is_diff else safe_clearance_plane
+
+        u_centers = (u_edges[valid_iu] + u_edges[valid_iu + 1]) / 2.0
+        v_centers = (v_edges[valid_iv] + v_edges[valid_iv + 1]) / 2.0
+
         if is_diff:
-            max_possible_height = scale * 10.0
-            base_h_plane = safe_clearance_plane + max_possible_height
+            bar_heights = np.maximum(0.2, (np.abs(avg_values) / max_abs) * scale * 10.0)
+            val_scalars = np.where(avg_values >= 0, 0.5, -0.5)
+            h_centers = np.where(avg_values >= 0, base_h_plane + (bar_heights / 2.0), base_h_plane - (bar_heights / 2.0))
         else:
-            base_h_plane = safe_clearance_plane
+            bar_heights = np.maximum(0.2, ((avg_values - global_min_w) / max(1e-5, (global_max_w - global_min_w))) * scale * 10.0)
+            val_scalars = np.zeros_like(avg_values)
+            h_centers = base_h_plane + (bar_heights / 2.0)
 
-        bar_thickness_ratio = 1.0
-        size_u = box_width * bar_thickness_ratio
-        size_v = box_width * bar_thickness_ratio
+        append_filter = vtk.vtkAppendPolyData()
+        size_u = box_width
+        size_v = box_width
 
-        for iu in range(grid_res_u):
-            u_center = (self.min_coords[u_ax] + self.max_coords[u_ax]) / 2.0 if slider_val == 100 else min_u + (iu + 0.5) * box_width
-                
-            for iv in range(grid_res_v):
-                v_center = (self.min_coords[v_ax] + self.max_coords[v_ax]) / 2.0 if slider_val == 100 else min_v + (iv + 0.5) * box_width
-                    
-                cell_weights = np.array(bin_contents[iu][iv])
-                if len(cell_weights) == 0: continue
+        for uc, vc, hc, bh, sc in zip(u_centers, v_centers, h_centers, bar_heights, val_scalars):
+            poly_box = self.make_cube_geometry(uc, vc, hc, size_u, size_v, bh, sc, u_ax, v_ax, axis_idx)
+            append_filter.AddInputData(poly_box)
 
-                avg_value = np.mean(cell_weights)
-                if abs(avg_value) < 1e-4: continue
-
-                bar_height = abs(avg_value / max_abs) * scale * 10.0 if is_diff else ((avg_value - global_min_w) / max(1e-5, (global_max_w - global_min_w))) * scale * 10.0
-                bar_height = max(0.2, bar_height) 
-
-                if is_diff:
-                    val_scalar = -0.5 if avg_value < 0 else 0.5
-                    if avg_value < 0:
-                        h_center = base_h_plane - (bar_height / 2.0)
-                    else:
-                        h_center = base_h_plane + (bar_height / 2.0)
-                else:
-                    val_scalar = 0.0
-                    h_center = base_h_plane + (bar_height / 2.0)
-
-                has_geometry = True
-                poly_box = self.make_cube_geometry(u_center, v_center, h_center, size_u, size_v, bar_height, val_scalar, u_ax, v_ax, axis_idx)
-                append_filter.AddInputData(poly_box)
-
-        poly_data = vtk.vtkPolyData()
-        if has_geometry:
-            append_filter.Update()
-            poly_data.ShallowCopy(append_filter.GetOutput())
+        append_filter.Update()
 
         mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(poly_data)
+        mapper.SetInputData(append_filter.GetOutput())
         mapper.ScalarVisibilityOn()
         mapper.SetLookupTable(lut)
-        
-        if is_diff:
-            mapper.SetScalarRange(-1.0, 1.0)
-        else:
-            mapper.SetScalarRange(0.0, 1.0)
-        
+        mapper.SetScalarRange(-1.0 if is_diff else 0.0, 1.0)
         mapper.SetResolveCoincidentTopologyToPolygonOffset()
         mapper.SetResolveCoincidentTopologyPolygonOffsetParameters(1.0, 1.0)
-        
+
         return mapper
 
     def setup_difference_particle_pipeline(self):
@@ -447,7 +495,6 @@ class FullHeightmapViewer(QMainWindow):
         self.update_particle_pipeline_arrays()
 
     def update_particle_pipeline_arrays(self):
-        """Updates particle sphere colors and radii with clean zero-scale collapsing."""
         vtk_node_pts = vtk.vtkPoints()
         for pt in self.center_coords:
             vtk_node_pts.InsertNextPoint(pt[0], pt[1], pt[2])
@@ -458,12 +505,13 @@ class FullHeightmapViewer(QMainWindow):
         size_pct = slider_val / 100.0
         current_max_scale = self.max_safe_particle_radius * (size_pct * 3.0)
 
+        num_pts = len(self.center_coords)
         size_vectors = vtk.vtkFloatArray()
         size_vectors.SetNumberOfComponents(3)
-        size_vectors.SetNumberOfTuples(len(self.center_coords))
+        size_vectors.SetNumberOfTuples(num_pts)
 
         color_scalars = vtk.vtkFloatArray()
-        color_scalars.SetNumberOfValues(len(self.center_coords))
+        color_scalars.SetNumberOfValues(num_pts)
 
         diff = self.weights_A - self.weights_B
         max_diff = np.max(np.abs(diff)) or 1.0
@@ -484,7 +532,7 @@ class FullHeightmapViewer(QMainWindow):
             self.mapper_nodes.ScalarVisibilityOff()
             self.actor_nodes.GetProperty().SetColor(1.0, 1.0, 1.0)
             
-            for i in range(len(self.center_coords)):
+            for i in range(num_pts):
                 if slider_val == 0:
                     norm_size = 0.0  
                 else:

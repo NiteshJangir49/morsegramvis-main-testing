@@ -4,7 +4,7 @@ import numpy as np
 import vtkmodules.all as vtk
 from vtkmodules.util.numpy_support import vtk_to_numpy, numpy_to_vtk
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout
 )
 from PySide6.QtCore import Qt
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
@@ -39,14 +39,8 @@ def load_vtp_network_scalars(vtp_path_A, vtp_path_B):
 
 
 class ZoomableVolumeMatrixComparator(QMainWindow):
-    """
-    High-Resolution Interactive Matrix View.
-    Generates a 16x16 sub-pixel tile per node cell (5816x5816 total resolution)
-    allowing seamless zooming into specific clusters/regions.
-    """
     def __init__(self, weights_A, weights_B):
         super().__init__()
-        # self.setWindowTitle("DiffSeer - Interactive 1454x1454 Volume Matrix Comparison")
         self.setGeometry(100, 100, 1100, 950)
 
         self.weights_A = weights_A
@@ -62,12 +56,6 @@ class ZoomableVolumeMatrixComparator(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
 
         control_layout = QHBoxLayout()
-        # control_layout.addWidget(QLabel("<b>Scroll to Zoom | Left-Click Drag to Pan</b>"))
-        
-        # btn_reset = QPushButton("Reset View")
-        # btn_reset.clicked.connect(self.reset_camera)
-        # control_layout.addWidget(btn_reset)
-        
         control_layout.addStretch()
         main_layout.addLayout(control_layout)
 
@@ -80,10 +68,10 @@ class ZoomableVolumeMatrixComparator(QMainWindow):
         self.vtkWidget.GetRenderWindow().AddRenderer(self.renderer)
         self.vtkWidget.Initialize()
         
-        # Use 2D Pan/Zoom Interactor Style
         self.style = vtk.vtkInteractorStyleImage()
         self.vtkWidget.SetInteractorStyle(self.style)
 
+        # Grayscale lookup table
         self.lut = vtk.vtkLookupTable()
         self.lut.SetNumberOfTableValues(256)
         self.lut.SetTableRange(0.0, 1.0)
@@ -100,28 +88,30 @@ class ZoomableVolumeMatrixComparator(QMainWindow):
         self.reset_camera()
 
     def build_highres_matrix_texture(self):
-        """Constructs higher sub-cell resolution texture so zooming reveals clear inner/outer squares."""
-        # print("[Rendering] Constructing high-resolution texture (16px per cell)...")
-        
         N = self.num_nodes
         sub_res = 16  
         
+        # 1. Symmetric outer product matrices
         mat_A = (self.norm_A[:, None] + self.norm_A[None, :]) / 2.0
         np.fill_diagonal(mat_A, self.norm_A)
 
         mat_B = (self.norm_B[:, None] + self.norm_B[None, :]) / 2.0
         np.fill_diagonal(mat_B, self.norm_B)
 
+        # 2. Tile to high-res sub-pixel grid
         grid_B = np.repeat(np.repeat(mat_B, sub_res, axis=0), sub_res, axis=1)
-
         grid_A = np.repeat(np.repeat(mat_A, sub_res, axis=0), sub_res, axis=1)
         
+        # 3. Inner square mask (Alper et al., 2013 nested visual encoding)
         mask = np.zeros((sub_res, sub_res), dtype=bool)
         m_start, m_end = int(sub_res * 0.25), int(sub_res * 0.75)
         mask[m_start:m_end, m_start:m_end] = True
         
         tile_mask = np.tile(mask, (N, N))
         texture = np.where(tile_mask, grid_A, grid_B)
+
+        # --- FIX: Flip array vertically to match VTK's bottom-left origin ---
+        texture = np.flipud(texture)
 
         h, w = texture.shape
         self.image_data.SetDimensions(w, h, 1)
@@ -136,11 +126,9 @@ class ZoomableVolumeMatrixComparator(QMainWindow):
         img_colors.Update()
 
         self.image_actor.GetMapper().SetInputConnection(img_colors.GetOutputPort())
-        
         self.image_actor.GetProperty().SetInterpolationTypeToNearest()
 
         self.vtkWidget.GetRenderWindow().Render()
-        # print("[Rendering] Complete.")
 
     def reset_camera(self):
         self.renderer.ResetCamera()

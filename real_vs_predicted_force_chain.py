@@ -149,8 +149,9 @@ class Fig3dMatrixDialog(QDialog):
 
         self.ax = self.fig.add_subplot(111)
 
-        self.cmap_a = matplotlib.colormaps['YlOrRd']
-        self.cmap_b = matplotlib.colormaps['YlGnBu']
+        # Colormaps: Volume A (Blues), Volume B (Reds)
+        self.cmap_a = matplotlib.colormaps['Blues']
+        self.cmap_b = matplotlib.colormaps['Reds']
 
     def draw_matrix(self, selected_nodes, weights_matrix_a, weights_matrix_b, active_min, active_max):
         self.ax.clear()
@@ -197,10 +198,11 @@ class Fig3dMatrixDialog(QDialog):
                     height_a = norm_a * usable_h
                     height_b = norm_b * usable_h
 
-                    color_a = self.cmap_a(norm_a)
-                    color_b = self.cmap_b(norm_b)
+                    # Scale from light to dark (0.3 to 1.0 range for readability)
+                    color_a = self.cmap_a(0.35 + 0.65 * norm_a) if norm_a > 0 else self.cmap_a(0.2)
+                    color_b = self.cmap_b(0.35 + 0.65 * norm_b) if norm_b > 0 else self.cmap_b(0.2)
 
-                    # Left Bar (Volume A - Actual)
+                    # Left Bar (Volume A - Actual Blue)
                     if w_a > 0:
                         bar_a_x = x + pad_x
                         bar_a_y = y + pad_bottom
@@ -209,12 +211,12 @@ class Fig3dMatrixDialog(QDialog):
                         self.ax.add_patch(bar_a)
 
                         lum_a = 0.299 * color_a[0] + 0.587 * color_a[1] + 0.114 * color_a[2]
-                        txt_color_a = 'black' if lum_a > 0.6 else 'white'
+                        txt_color_a = 'black' if lum_a > 0.55 else 'white'
                         self.ax.text(bar_a_x + usable_w / 2.0, bar_a_y + max(height_a / 2.0, 0.12), f"{w_a:.2f}", 
                                      color=txt_color_a, fontsize=font_sz, fontweight='bold',
                                      ha='center', va='center', rotation=90)
 
-                    # Right Bar (Volume B - Predicted)
+                    # Right Bar (Volume B - Predicted Red)
                     if w_b > 0:
                         bar_b_x = x + pad_x + usable_w
                         bar_b_y = y + pad_bottom
@@ -223,7 +225,7 @@ class Fig3dMatrixDialog(QDialog):
                         self.ax.add_patch(bar_b)
 
                         lum_b = 0.299 * color_b[0] + 0.587 * color_b[1] + 0.114 * color_b[2]
-                        txt_color_b = 'black' if lum_b > 0.6 else 'white'
+                        txt_color_b = 'black' if lum_b > 0.55 else 'white'
                         self.ax.text(bar_b_x + usable_w / 2.0, bar_b_y + max(height_b / 2.0, 0.12), f"{w_b:.2f}", 
                                      color=txt_color_b, fontsize=font_sz, fontweight='bold',
                                      ha='center', va='center', rotation=90)
@@ -237,7 +239,7 @@ class Fig3dMatrixDialog(QDialog):
         self.ax.set_yticklabels([str(n) for n in selected_nodes], color='cyan', fontsize=9)
 
         self.ax.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
-        self.ax.set_title("Fig 3(d) Matrix (Left Bar: Vol A [Heat] | Right Bar: Vol B [Cool])", color='white', pad=20, fontsize=11)
+        self.ax.set_title("Fig 3(d) Matrix (Left: Vol A [Blue] | Right: Vol B [Red])", color='white', pad=20, fontsize=11)
 
         self.fig.tight_layout()
         self.canvas.draw()
@@ -249,7 +251,7 @@ class Fig3dMatrixDialog(QDialog):
 class DualPanelForceChainBuilder(QMainWindow):
     def __init__(self, adj_matrix, weights_a, weights_b, node_weights_a, node_weights_b, coords, ball_ids):
         super().__init__()
-        self.setWindowTitle("Particle Selector & Force Chain Comparison (Assembly 58, Timestep 80)")
+        self.setWindowTitle("Parallel Force Chains (Vol A: Blue | Vol B: Red)")
         self.setGeometry(50, 50, 1500, 850)
 
         self.adj_matrix = adj_matrix
@@ -270,7 +272,7 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.selected_node_indices = set()
         self.hovered_node_idx = -1
         self.active_visible_nodes_left = []
-        self.active_visible_nodes_right = []
+        self.current_selected_nodes_right = []
 
         self.COLOR_NORMAL = (200, 200, 200)
         self.COLOR_HOVER = (0, 230, 255)
@@ -336,33 +338,45 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.ren_left.ResetCamera()
 
     def build_graphs_from_arrays(self):
-        self.G_a = nx.Graph()
-        self.G_b = nx.Graph()
-
-        for i in range(self.num_nodes):
-            self.G_a.add_node(i, pos=self.coords[i], weight=self.node_weights_a[i])
-            self.G_b.add_node(i, pos=self.coords[i], weight=self.node_weights_b[i])
+        self.all_edges = []
+        all_edge_weights = []
 
         for i in range(self.num_nodes):
             for j in range(i + 1, self.num_nodes):
                 if self.adj_matrix[i, j] == 1:
                     wa = self.weights_a[i, j]
                     wb = self.weights_b[i, j]
-                    if wa > 0:
-                        self.G_a.add_edge(i, j, weight=wa)
-                    if wb > 0:
-                        self.G_b.add_edge(i, j, weight=wb)
+                    self.all_edges.append((i, j, wa, wb))
+                    if wa > 0: all_edge_weights.append(wa)
+                    if wb > 0: all_edge_weights.append(wb)
 
-        # Maximum Spanning Tree backbone extraction
-        self.mst_a = nx.maximum_spanning_tree(self.G_a, weight='weight')
-        self.mst_b = nx.maximum_spanning_tree(self.G_b, weight='weight')
-
-        all_edge_weights = []
-        for _, _, d in self.mst_a.edges(data=True):
-            all_edge_weights.append(d['weight'])
-        for _, _, d in self.mst_b.edges(data=True):
-            all_edge_weights.append(d['weight'])
         self.raw_weights = np.array(all_edge_weights, dtype=np.float32)
+
+    def create_lut_a(self):
+        """Volume A: Light Blue (0.5, 0.8, 1.0) to Dark Blue (0.0, 0.05, 0.6)"""
+        lut = vtk.vtkLookupTable()
+        lut.SetNumberOfTableValues(256)
+        for i in range(256):
+            t = i / 255.0
+            r = 0.55 * (1.0 - t)
+            g = 0.80 * (1.0 - t) + 0.05 * t
+            b = 1.0 * (1.0 - t) + 0.65 * t
+            lut.SetTableValue(i, r, g, b, 1.0)
+        lut.Build()
+        return lut
+
+    def create_lut_b(self):
+        """Volume B: Light Red (1.0, 0.7, 0.7) to Dark Red (0.6, 0.0, 0.0)"""
+        lut = vtk.vtkLookupTable()
+        lut.SetNumberOfTableValues(256)
+        for i in range(256):
+            t = i / 255.0
+            r = 1.0 * (1.0 - t) + 0.65 * t
+            g = 0.70 * (1.0 - t)
+            b = 0.70 * (1.0 - t)
+            lut.SetTableValue(i, r, g, b, 1.0)
+        lut.Build()
+        return lut
 
     def setup_left_panel(self):
         left_container = QFrame()
@@ -387,6 +401,7 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.picker_left = vtk.vtkCellPicker()
         self.picker_left.SetTolerance(0.005)
 
+        # Particles (Spheres)
         self.left_nodes_polydata = vtk.vtkPolyData()
         self.left_particle_colors = vtk.vtkUnsignedCharArray()
         self.left_particle_colors.SetNumberOfComponents(3)
@@ -414,23 +429,33 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.picker_left.AddPickList(self.left_actor_nodes)
         self.picker_left.PickFromListOn()
 
-        self.left_edge_lut = vtk.vtkLookupTable()
-        self.left_edge_lut.SetNumberOfTableValues(256)
-        for i in range(256):
-            t = i / 255.0
-            self.left_edge_lut.SetTableValue(i, t, 0.2 * (1.0 - t), 1.0 - t, 1.0)
-        self.left_edge_lut.Build()
+        # Lookup Tables for Volume A and B
+        self.lut_a = self.create_lut_a()
+        self.lut_b = self.create_lut_b()
 
-        self.left_chains_polydata = vtk.vtkPolyData()
-        self.left_chains_mapper = vtk.vtkPolyDataMapper()
-        self.left_chains_mapper.SetInputData(self.left_chains_polydata)
-        self.left_chains_mapper.SetLookupTable(self.left_edge_lut)
-        self.left_chains_mapper.SetScalarModeToUseCellData()
+        # Volume A Parallel Edges (Blue)
+        self.left_chains_a_polydata = vtk.vtkPolyData()
+        self.left_chains_a_mapper = vtk.vtkPolyDataMapper()
+        self.left_chains_a_mapper.SetInputData(self.left_chains_a_polydata)
+        self.left_chains_a_mapper.SetLookupTable(self.lut_a)
+        self.left_chains_a_mapper.SetScalarModeToUseCellData()
 
-        self.left_actor_chains = vtk.vtkActor()
-        self.left_actor_chains.SetMapper(self.left_chains_mapper)
-        self.left_actor_chains.GetProperty().SetLineWidth(1.5)
-        self.ren_left.AddActor(self.left_actor_chains)
+        self.left_actor_chains_a = vtk.vtkActor()
+        self.left_actor_chains_a.SetMapper(self.left_chains_a_mapper)
+        self.left_actor_chains_a.GetProperty().SetLineWidth(1.8)
+        self.ren_left.AddActor(self.left_actor_chains_a)
+
+        # Volume B Parallel Edges (Red)
+        self.left_chains_b_polydata = vtk.vtkPolyData()
+        self.left_chains_b_mapper = vtk.vtkPolyDataMapper()
+        self.left_chains_b_mapper.SetInputData(self.left_chains_b_polydata)
+        self.left_chains_b_mapper.SetLookupTable(self.lut_b)
+        self.left_chains_b_mapper.SetScalarModeToUseCellData()
+
+        self.left_actor_chains_b = vtk.vtkActor()
+        self.left_actor_chains_b.SetMapper(self.left_chains_b_mapper)
+        self.left_actor_chains_b.GetProperty().SetLineWidth(1.8)
+        self.ren_left.AddActor(self.left_actor_chains_b)
 
         self.splitter.addWidget(left_container)
 
@@ -484,16 +509,29 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.picker_right.AddPickList(self.right_actor_nodes)
         self.picker_right.PickFromListOn()
 
-        self.right_chains_polydata = vtk.vtkPolyData()
-        self.right_chains_mapper = vtk.vtkPolyDataMapper()
-        self.right_chains_mapper.SetInputData(self.right_chains_polydata)
-        self.right_chains_mapper.SetLookupTable(self.left_edge_lut)
-        self.right_chains_mapper.SetScalarModeToUseCellData()
+        # Volume A Parallel Edges (Right Panel)
+        self.right_chains_a_polydata = vtk.vtkPolyData()
+        self.right_chains_a_mapper = vtk.vtkPolyDataMapper()
+        self.right_chains_a_mapper.SetInputData(self.right_chains_a_polydata)
+        self.right_chains_a_mapper.SetLookupTable(self.lut_a)
+        self.right_chains_a_mapper.SetScalarModeToUseCellData()
 
-        self.right_actor_chains = vtk.vtkActor()
-        self.right_actor_chains.SetMapper(self.right_chains_mapper)
-        self.right_actor_chains.GetProperty().SetLineWidth(1.5)
-        self.ren_right.AddActor(self.right_actor_chains)
+        self.right_actor_chains_a = vtk.vtkActor()
+        self.right_actor_chains_a.SetMapper(self.right_chains_a_mapper)
+        self.right_actor_chains_a.GetProperty().SetLineWidth(1.8)
+        self.ren_right.AddActor(self.right_actor_chains_a)
+
+        # Volume B Parallel Edges (Right Panel)
+        self.right_chains_b_polydata = vtk.vtkPolyData()
+        self.right_chains_b_mapper = vtk.vtkPolyDataMapper()
+        self.right_chains_b_mapper.SetInputData(self.right_chains_b_polydata)
+        self.right_chains_b_mapper.SetLookupTable(self.lut_b)
+        self.right_chains_b_mapper.SetScalarModeToUseCellData()
+
+        self.right_actor_chains_b = vtk.vtkActor()
+        self.right_actor_chains_b.SetMapper(self.right_chains_b_mapper)
+        self.right_actor_chains_b.GetProperty().SetLineWidth(1.8)
+        self.ren_right.AddActor(self.right_actor_chains_b)
 
         self.splitter.addWidget(right_container)
 
@@ -528,17 +566,16 @@ class DualPanelForceChainBuilder(QMainWindow):
         weights_matrix_a = {}
         weights_matrix_b = {}
 
-        # Fill edge weights: both volumes use the corresponding edge weight for every active edge
-        for u, v, attr in self.pruned_mst_a.edges(data=True):
-            weights_matrix_a[(u, v)] = attr['weight']
-            weights_matrix_a[(v, u)] = attr['weight']
+        min_w_threshold = np.percentile(self.raw_weights, self.threshold_slider.value()) if len(self.raw_weights) > 0 else 0.0
 
-            # Populate Volume B's edge weight from the predicted edge matrix
-            w_b = self.weights_b[u, v] if self.weights_b[u, v] > 0 else min(self.node_weights_b[u], self.node_weights_b[v])
-            weights_matrix_b[(u, v)] = w_b
-            weights_matrix_b[(v, u)] = w_b
+        for (u, v, wa, wb) in self.all_edges:
+            if wa >= min_w_threshold:
+                weights_matrix_a[(u, v)] = wa
+                weights_matrix_a[(v, u)] = wa
+            if wb >= min_w_threshold:
+                weights_matrix_b[(u, v)] = wb
+                weights_matrix_b[(v, u)] = wb
 
-        # Fill diagonal node weights
         for n in selected_list:
             weights_matrix_a[(n, n)] = self.node_weights_a[n]
             weights_matrix_b[(n, n)] = self.node_weights_b[n]
@@ -551,23 +588,34 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         self.slider_label.setText(f"Weight Threshold Value: {min_weight_threshold:.2f}")
 
-        # Filter MST A & B by current threshold
-        self.pruned_mst_a = self.mst_a.copy()
-        nodes_remove_a = [n for n, attr in self.pruned_mst_a.nodes(data=True) if attr['weight'] < min_weight_threshold]
-        self.pruned_mst_a.remove_nodes_from(nodes_remove_a)
+        # 1. Filter active edges for Volume A and Volume B individually
+        self.active_edges_a = []
+        self.active_edges_b = []
+        nodes_with_edges = set()
 
-        self.pruned_mst_b = self.mst_b.copy()
-        nodes_remove_b = [n for n, attr in self.pruned_mst_b.nodes(data=True) if attr['weight'] < min_weight_threshold]
-        self.pruned_mst_b.remove_nodes_from(nodes_remove_b)
+        for (u, v, wa, wb) in self.all_edges:
+            edge_a_active = (wa >= min_weight_threshold)
+            edge_b_active = (wb >= min_weight_threshold)
 
-        # Particle Disappearance: Filter particles exceeding threshold weight
-        self.active_visible_nodes_left = [i for i in range(self.num_nodes) if self.node_weights_a[i] >= min_weight_threshold]
-        self.active_visible_nodes_right = [i for i in range(self.num_nodes) if self.node_weights_b[i] >= min_weight_threshold]
+            if edge_a_active:
+                self.active_edges_a.append((u, v, wa))
+                nodes_with_edges.add(u)
+                nodes_with_edges.add(v)
+
+            if edge_b_active:
+                self.active_edges_b.append((u, v, wb))
+                nodes_with_edges.add(u)
+                nodes_with_edges.add(v)
+
+        # 2. Node removal rule: Keep node only if connected to at least one active edge in Vol A OR Vol B
+        self.active_visible_nodes_left = sorted(list(nodes_with_edges))
 
         if len(self.active_visible_nodes_left) == 0:
             self.left_actor_nodes.SetVisibility(False)
-            self.left_actor_chains.SetVisibility(False)
+            self.left_actor_chains_a.SetVisibility(False)
+            self.left_actor_chains_b.SetVisibility(False)
             self.vtk_left.GetRenderWindow().Render()
+            self.update_right_subgraph()
             return
 
         active_coords = self.coords[self.active_visible_nodes_left]
@@ -578,52 +626,107 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.update_particle_colors()
         self.left_actor_nodes.SetVisibility(True)
 
-        lines = vtk.vtkCellArray()
-        line_pts = vtk.vtkPoints()
-        edge_weight_list = []
+        # 3. Build Parallel Edges for Volume A (Blue) and Volume B (Red)
+        delta_offset = 0.008  # Parallel separation distance
 
-        point_idx = 0
-        for u, v, attr in self.pruned_mst_a.edges(data=True):
+        # --- Volume A Parallel Lines ---
+        lines_a = vtk.vtkCellArray()
+        line_pts_a = vtk.vtkPoints()
+        edge_weight_list_a = []
+        pt_idx_a = 0
+
+        for u, v, wa in self.active_edges_a:
             p1, p2 = self.coords[u], self.coords[v]
-            edge_weight_list.append(attr['weight'])
+            vec = p2 - p1
+            norm_vec = np.linalg.norm(vec)
+            if norm_vec < 1e-9: continue
+            u_dir = vec / norm_vec
 
-            line_pts.InsertNextPoint(p1)
-            line_pts.InsertNextPoint(p2)
+            ref = np.array([0, 0, 1.0], dtype=np.float32) if abs(u_dir[2]) < 0.9 else np.array([0, 1.0, 0], dtype=np.float32)
+            n_perp = np.cross(u_dir, ref)
+            n_perp = n_perp / np.linalg.norm(n_perp)
+
+            p1_offset = p1 - delta_offset * n_perp
+            p2_offset = p2 - delta_offset * n_perp
+
+            line_pts_a.InsertNextPoint(p1_offset)
+            line_pts_a.InsertNextPoint(p2_offset)
 
             line = vtk.vtkLine()
-            line.GetPointIds().SetId(0, point_idx)
-            line.GetPointIds().SetId(1, point_idx + 1)
-            lines.InsertNextCell(line)
+            line.GetPointIds().SetId(0, pt_idx_a)
+            line.GetPointIds().SetId(1, pt_idx_a + 1)
+            lines_a.InsertNextCell(line)
 
-            point_idx += 2
+            edge_weight_list_a.append(wa)
+            pt_idx_a += 2
 
-        edge_weights = np.array(edge_weight_list, dtype=np.float32)
-        
-        weights_a_active = [attr['weight'] for _, _, attr in self.pruned_mst_a.edges(data=True)]
-        weights_b_active = [attr['weight'] for _, _, attr in self.pruned_mst_b.edges(data=True)]
-        combined_active_weights = weights_a_active + weights_b_active
+        # --- Volume B Parallel Lines ---
+        lines_b = vtk.vtkCellArray()
+        line_pts_b = vtk.vtkPoints()
+        edge_weight_list_b = []
+        pt_idx_b = 0
 
+        for u, v, wb in self.active_edges_b:
+            p1, p2 = self.coords[u], self.coords[v]
+            vec = p2 - p1
+            norm_vec = np.linalg.norm(vec)
+            if norm_vec < 1e-9: continue
+            u_dir = vec / norm_vec
+
+            ref = np.array([0, 0, 1.0], dtype=np.float32) if abs(u_dir[2]) < 0.9 else np.array([0, 1.0, 0], dtype=np.float32)
+            n_perp = np.cross(u_dir, ref)
+            n_perp = n_perp / np.linalg.norm(n_perp)
+
+            p1_offset = p1 + delta_offset * n_perp
+            p2_offset = p2 + delta_offset * n_perp
+
+            line_pts_b.InsertNextPoint(p1_offset)
+            line_pts_b.InsertNextPoint(p2_offset)
+
+            line = vtk.vtkLine()
+            line.GetPointIds().SetId(0, pt_idx_b)
+            line.GetPointIds().SetId(1, pt_idx_b + 1)
+            lines_b.InsertNextCell(line)
+
+            edge_weight_list_b.append(wb)
+            pt_idx_b += 2
+
+        # Color Scale ranges
+        combined_active_weights = edge_weight_list_a + edge_weight_list_b
         if len(combined_active_weights) > 0:
             self.active_min_w = float(np.min(combined_active_weights))
             self.active_max_w = float(np.max(combined_active_weights))
             if self.active_min_w == self.active_max_w:
                 self.active_max_w += 1e-5
 
-            self.left_edge_lut.SetTableRange(self.active_min_w, self.active_max_w)
-            self.left_edge_lut.Build()
-            self.left_chains_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
-            self.right_chains_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
+            self.lut_a.SetTableRange(self.active_min_w, self.active_max_w)
+            self.lut_b.SetTableRange(self.active_min_w, self.active_max_w)
+            self.left_chains_a_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
+            self.left_chains_b_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
+            self.right_chains_a_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
+            self.right_chains_b_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
 
-        edge_weight_array = numpy_to_vtk(edge_weights, deep=True)
-        edge_weight_array.SetName("EdgeWeights")
+        # Update Vol A Polydata
+        if len(edge_weight_list_a) > 0:
+            arr_a = numpy_to_vtk(np.array(edge_weight_list_a, dtype=np.float32), deep=True)
+            self.left_chains_a_polydata.SetPoints(line_pts_a)
+            self.left_chains_a_polydata.SetLines(lines_a)
+            self.left_chains_a_polydata.GetCellData().SetScalars(arr_a)
+            self.left_actor_chains_a.SetVisibility(True)
+        else:
+            self.left_actor_chains_a.SetVisibility(False)
 
-        self.left_chains_polydata.SetPoints(line_pts)
-        self.left_chains_polydata.SetLines(lines)
-        self.left_chains_polydata.GetCellData().SetScalars(edge_weight_array)
+        # Update Vol B Polydata
+        if len(edge_weight_list_b) > 0:
+            arr_b = numpy_to_vtk(np.array(edge_weight_list_b, dtype=np.float32), deep=True)
+            self.left_chains_b_polydata.SetPoints(line_pts_b)
+            self.left_chains_b_polydata.SetLines(lines_b)
+            self.left_chains_b_polydata.GetCellData().SetScalars(arr_b)
+            self.left_actor_chains_b.SetVisibility(True)
+        else:
+            self.left_actor_chains_b.SetVisibility(False)
 
-        self.left_actor_chains.SetVisibility(len(edge_weight_list) > 0)
         self.vtk_left.GetRenderWindow().Render()
-
         self.update_right_subgraph()
 
     def update_particle_colors(self):
@@ -657,7 +760,8 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         if len(self.current_selected_nodes_right) == 0:
             self.right_actor_nodes.SetVisibility(False)
-            self.right_actor_chains.SetVisibility(False)
+            self.right_actor_chains_a.SetVisibility(False)
+            self.right_actor_chains_b.SetVisibility(False)
             self.vtk_right.GetRenderWindow().Render()
             if self.matrix_dialog.isVisible():
                 self.update_matrix_view()
@@ -671,36 +775,89 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.update_particle_colors()
         self.right_actor_nodes.SetVisibility(True)
 
-        lines = vtk.vtkCellArray()
-        line_pts = vtk.vtkPoints()
-        edge_weight_list = []
+        delta_offset = 0.008
 
-        point_idx = 0
-        for u, v, attr in self.pruned_mst_a.edges(data=True):
+        # --- Right Subgraph Volume A Parallel Edges ---
+        lines_a = vtk.vtkCellArray()
+        line_pts_a = vtk.vtkPoints()
+        edge_weight_list_a = []
+        pt_idx_a = 0
+
+        for u, v, wa in self.active_edges_a:
             if u in self.selected_node_indices and v in self.selected_node_indices:
                 p1, p2 = self.coords[u], self.coords[v]
-                edge_weight_list.append(attr['weight'])
+                vec = p2 - p1
+                norm_vec = np.linalg.norm(vec)
+                if norm_vec < 1e-9: continue
+                u_dir = vec / norm_vec
 
-                line_pts.InsertNextPoint(p1)
-                line_pts.InsertNextPoint(p2)
+                ref = np.array([0, 0, 1.0], dtype=np.float32) if abs(u_dir[2]) < 0.9 else np.array([0, 1.0, 0], dtype=np.float32)
+                n_perp = np.cross(u_dir, ref)
+                n_perp = n_perp / np.linalg.norm(n_perp)
+
+                p1_offset = p1 - delta_offset * n_perp
+                p2_offset = p2 - delta_offset * n_perp
+
+                line_pts_a.InsertNextPoint(p1_offset)
+                line_pts_a.InsertNextPoint(p2_offset)
 
                 line = vtk.vtkLine()
-                line.GetPointIds().SetId(0, point_idx)
-                line.GetPointIds().SetId(1, point_idx + 1)
-                lines.InsertNextCell(line)
+                line.GetPointIds().SetId(0, pt_idx_a)
+                line.GetPointIds().SetId(1, pt_idx_a + 1)
+                lines_a.InsertNextCell(line)
 
-                point_idx += 2
+                edge_weight_list_a.append(wa)
+                pt_idx_a += 2
 
-        if len(edge_weight_list) > 0:
-            edge_weights = np.array(edge_weight_list, dtype=np.float32)
-            edge_weight_array = numpy_to_vtk(edge_weights, deep=True)
+        # --- Right Subgraph Volume B Parallel Edges ---
+        lines_b = vtk.vtkCellArray()
+        line_pts_b = vtk.vtkPoints()
+        edge_weight_list_b = []
+        pt_idx_b = 0
 
-            self.right_chains_polydata.SetPoints(line_pts)
-            self.right_chains_polydata.SetLines(lines)
-            self.right_chains_polydata.GetCellData().SetScalars(edge_weight_array)
-            self.right_actor_chains.SetVisibility(True)
+        for u, v, wb in self.active_edges_b:
+            if u in self.selected_node_indices and v in self.selected_node_indices:
+                p1, p2 = self.coords[u], self.coords[v]
+                vec = p2 - p1
+                norm_vec = np.linalg.norm(vec)
+                if norm_vec < 1e-9: continue
+                u_dir = vec / norm_vec
+
+                ref = np.array([0, 0, 1.0], dtype=np.float32) if abs(u_dir[2]) < 0.9 else np.array([0, 1.0, 0], dtype=np.float32)
+                n_perp = np.cross(u_dir, ref)
+                n_perp = n_perp / np.linalg.norm(n_perp)
+
+                p1_offset = p1 + delta_offset * n_perp
+                p2_offset = p2 + delta_offset * n_perp
+
+                line_pts_b.InsertNextPoint(p1_offset)
+                line_pts_b.InsertNextPoint(p2_offset)
+
+                line = vtk.vtkLine()
+                line.GetPointIds().SetId(0, pt_idx_b)
+                line.GetPointIds().SetId(1, pt_idx_b + 1)
+                lines_b.InsertNextCell(line)
+
+                edge_weight_list_b.append(wb)
+                pt_idx_b += 2
+
+        if len(edge_weight_list_a) > 0:
+            arr_a = numpy_to_vtk(np.array(edge_weight_list_a, dtype=np.float32), deep=True)
+            self.right_chains_a_polydata.SetPoints(line_pts_a)
+            self.right_chains_a_polydata.SetLines(lines_a)
+            self.right_chains_a_polydata.GetCellData().SetScalars(arr_a)
+            self.right_actor_chains_a.SetVisibility(True)
         else:
-            self.right_actor_chains.SetVisibility(False)
+            self.right_actor_chains_a.SetVisibility(False)
+
+        if len(edge_weight_list_b) > 0:
+            arr_b = numpy_to_vtk(np.array(edge_weight_list_b, dtype=np.float32), deep=True)
+            self.right_chains_b_polydata.SetPoints(line_pts_b)
+            self.right_chains_b_polydata.SetLines(lines_b)
+            self.right_chains_b_polydata.GetCellData().SetScalars(arr_b)
+            self.right_actor_chains_b.SetVisibility(True)
+        else:
+            self.right_actor_chains_b.SetVisibility(False)
 
         self.vtk_right.GetRenderWindow().Render()
 
@@ -803,6 +960,7 @@ class DualPanelForceChainBuilder(QMainWindow):
 def main():
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
+    # Loads Assembly 58, Timestep 80
     adj_matrix, weights_a, weights_b, node_weights_a, node_weights_b, coords, ball_ids = load_real_and_predicted_data(
         assembly_id=58, 
         timestep=80

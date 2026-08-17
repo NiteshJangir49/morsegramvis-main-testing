@@ -9,7 +9,7 @@ from vtkmodules.util.numpy_support import numpy_to_vtk
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QLabel, QPushButton, QSlider, QCheckBox, QSplitter, QFrame, QDialog
+    QLabel, QPushButton, QSlider, QCheckBox, QComboBox, QSplitter, QFrame, QDialog
 )
 from PySide6.QtCore import Qt
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
@@ -20,6 +20,7 @@ matplotlib.use('QtAgg')
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.patches as patches
+import matplotlib.colors as mcolors
 
 
 # ==============================================================================
@@ -149,9 +150,17 @@ class Fig3dMatrixDialog(QDialog):
 
         self.ax = self.fig.add_subplot(111)
 
-        # Colormaps: Volume A (Blues), Volume B (Reds)
-        self.cmap_a = matplotlib.colormaps['Blues']
-        self.cmap_b = matplotlib.colormaps['Reds']
+        # Colormaps without white:
+        # Vol A (Actual): Cyan -> Royal Blue -> Navy
+        self.cmap_a = mcolors.LinearSegmentedColormap.from_list(
+            'vol_a_cyan_blue',
+            [(0.0, 0.85, 0.95), (0.1, 0.45, 0.95), (0.05, 0.15, 0.65), (0.02, 0.05, 0.35)]
+        )
+        # Vol B (Predicted): Bright Gold/Orange -> Vermilion -> Dark Crimson
+        self.cmap_b = mcolors.LinearSegmentedColormap.from_list(
+            'vol_b_amber_crimson',
+            [(1.0, 0.68, 0.0), (0.95, 0.30, 0.05), (0.75, 0.05, 0.10), (0.40, 0.0, 0.05)]
+        )
 
     def draw_matrix(self, selected_nodes, weights_matrix_a, weights_matrix_b, active_min, active_max):
         self.ax.clear()
@@ -185,10 +194,10 @@ class Fig3dMatrixDialog(QDialog):
                 y = N - 1 - i
 
                 is_diagonal = (i == j)
-                bg_color = '#D8D8D8' if is_diagonal else '#FFFFFF'
+                bg_color = '#C8C8C8' if is_diagonal else '#EBEBEB'
 
                 rect_bg = patches.Rectangle((x, y), 1.0, 1.0, 
-                                            facecolor=bg_color, edgecolor='#B0B0B0', linewidth=0.6)
+                                            facecolor=bg_color, edgecolor='#A0A0A0', linewidth=0.6)
                 self.ax.add_patch(rect_bg)
 
                 if w_a > 0 or w_b > 0:
@@ -198,34 +207,33 @@ class Fig3dMatrixDialog(QDialog):
                     height_a = norm_a * usable_h
                     height_b = norm_b * usable_h
 
-                    # Scale from light to dark (0.3 to 1.0 range for readability)
-                    color_a = self.cmap_a(0.35 + 0.65 * norm_a) if norm_a > 0 else self.cmap_a(0.2)
-                    color_b = self.cmap_b(0.35 + 0.65 * norm_b) if norm_b > 0 else self.cmap_b(0.2)
+                    color_a = self.cmap_a(norm_a)
+                    color_b = self.cmap_b(norm_b)
 
-                    # Left Bar (Volume A - Actual Blue)
+                    # Left Bar (Volume A - Cyan/Blue)
                     if w_a > 0:
                         bar_a_x = x + pad_x
                         bar_a_y = y + pad_bottom
                         bar_a = patches.Rectangle((bar_a_x, bar_a_y), usable_w, height_a, 
-                                                  facecolor=color_a, edgecolor='#222222', linewidth=0.3)
+                                                  facecolor=color_a, edgecolor='#111111', linewidth=0.3)
                         self.ax.add_patch(bar_a)
 
                         lum_a = 0.299 * color_a[0] + 0.587 * color_a[1] + 0.114 * color_a[2]
-                        txt_color_a = 'black' if lum_a > 0.55 else 'white'
+                        txt_color_a = 'black' if lum_a > 0.50 else 'white'
                         self.ax.text(bar_a_x + usable_w / 2.0, bar_a_y + max(height_a / 2.0, 0.12), f"{w_a:.2f}", 
                                      color=txt_color_a, fontsize=font_sz, fontweight='bold',
                                      ha='center', va='center', rotation=90)
 
-                    # Right Bar (Volume B - Predicted Red)
+                    # Right Bar (Volume B - Amber/Crimson)
                     if w_b > 0:
                         bar_b_x = x + pad_x + usable_w
                         bar_b_y = y + pad_bottom
                         bar_b = patches.Rectangle((bar_b_x, bar_b_y), usable_w, height_b, 
-                                                  facecolor=color_b, edgecolor='#222222', linewidth=0.3)
+                                                  facecolor=color_b, edgecolor='#111111', linewidth=0.3)
                         self.ax.add_patch(bar_b)
 
                         lum_b = 0.299 * color_b[0] + 0.587 * color_b[1] + 0.114 * color_b[2]
-                        txt_color_b = 'black' if lum_b > 0.55 else 'white'
+                        txt_color_b = 'black' if lum_b > 0.50 else 'white'
                         self.ax.text(bar_b_x + usable_w / 2.0, bar_b_y + max(height_b / 2.0, 0.12), f"{w_b:.2f}", 
                                      color=txt_color_b, fontsize=font_sz, fontweight='bold',
                                      ha='center', va='center', rotation=90)
@@ -239,7 +247,7 @@ class Fig3dMatrixDialog(QDialog):
         self.ax.set_yticklabels([str(n) for n in selected_nodes], color='cyan', fontsize=9)
 
         self.ax.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
-        self.ax.set_title("Fig 3(d) Matrix (Left: Vol A [Blue] | Right: Vol B [Red])", color='white', pad=20, fontsize=11)
+        self.ax.set_title("Fig 3(d) Matrix (Left: Vol A [Cyan-Navy] | Right: Vol B [Amber-Crimson])", color='white', pad=20, fontsize=11)
 
         self.fig.tight_layout()
         self.canvas.draw()
@@ -251,7 +259,7 @@ class Fig3dMatrixDialog(QDialog):
 class DualPanelForceChainBuilder(QMainWindow):
     def __init__(self, adj_matrix, weights_a, weights_b, node_weights_a, node_weights_b, coords, ball_ids):
         super().__init__()
-        self.setWindowTitle("Parallel Force Chains (Vol A: Blue | Vol B: Red)")
+        self.setWindowTitle("Parallel Force Chains (Vol A: Cyan-Navy | Vol B: Amber-Crimson)")
         self.setGeometry(50, 50, 1500, 850)
 
         self.adj_matrix = adj_matrix
@@ -274,8 +282,8 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.active_visible_nodes_left = []
         self.current_selected_nodes_right = []
 
-        self.COLOR_NORMAL = (200, 200, 200)
-        self.COLOR_HOVER = (0, 230, 255)
+        self.COLOR_NORMAL = (180, 180, 180)
+        self.COLOR_HOVER = (0, 255, 255)
         self.COLOR_SELECTED = (255, 230, 0)
 
         self.build_graphs_from_arrays()
@@ -303,6 +311,14 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.lock_camera_checkbox.setStyleSheet("font-weight: bold; color: #00e6ff; font-size: 13px;")
         self.lock_camera_checkbox.toggled.connect(self.on_camera_lock_toggled)
 
+        edge_filter_label = QLabel("Edge Filter:")
+        edge_filter_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        
+        self.edge_mode_combo = QComboBox()
+        self.edge_mode_combo.addItems(["Default (Union)", "Only from A", "Only from B", "Both (Intersection)"])
+        self.edge_mode_combo.setStyleSheet("font-weight: bold; padding: 3px 8px; font-size: 12px;")
+        self.edge_mode_combo.currentIndexChanged.connect(self.on_edge_mode_changed)
+
         self.matrix_btn = QPushButton("Open Matrix View")
         self.matrix_btn.setStyleSheet("font-weight: bold; padding: 4px 12px; background-color: #005588; color: white;")
         self.matrix_btn.clicked.connect(self.open_matrix_window)
@@ -315,6 +331,9 @@ class DualPanelForceChainBuilder(QMainWindow):
         control_layout.addWidget(self.threshold_slider)
         control_layout.addSpacing(10)
         control_layout.addWidget(self.lock_camera_checkbox)
+        control_layout.addSpacing(10)
+        control_layout.addWidget(edge_filter_label)
+        control_layout.addWidget(self.edge_mode_combo)
         control_layout.addSpacing(10)
         control_layout.addWidget(self.matrix_btn)
         control_layout.addSpacing(10)
@@ -353,27 +372,27 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.raw_weights = np.array(all_edge_weights, dtype=np.float32)
 
     def create_lut_a(self):
-        """Volume A: Light Blue (0.5, 0.8, 1.0) to Dark Blue (0.0, 0.05, 0.6)"""
+        """Volume A: Rich Cyan (0.0, 0.85, 0.95) -> Deep Navy Blue (0.02, 0.05, 0.35)"""
         lut = vtk.vtkLookupTable()
         lut.SetNumberOfTableValues(256)
         for i in range(256):
             t = i / 255.0
-            r = 0.55 * (1.0 - t)
-            g = 0.80 * (1.0 - t) + 0.05 * t
-            b = 1.0 * (1.0 - t) + 0.65 * t
+            r = (0.0 * (1.0 - t) + 0.02 * t)
+            g = (0.85 * (1.0 - t)**2 + 0.45 * 2.0 * t * (1.0 - t) + 0.05 * t**2)
+            b = (0.95 * (1.0 - t) + 0.35 * t)
             lut.SetTableValue(i, r, g, b, 1.0)
         lut.Build()
         return lut
 
     def create_lut_b(self):
-        """Volume B: Light Red (1.0, 0.7, 0.7) to Dark Red (0.6, 0.0, 0.0)"""
+        """Volume B: Warm Amber/Orange (1.0, 0.68, 0.0) -> Deep Crimson Red (0.40, 0.0, 0.05)"""
         lut = vtk.vtkLookupTable()
         lut.SetNumberOfTableValues(256)
         for i in range(256):
             t = i / 255.0
-            r = 1.0 * (1.0 - t) + 0.65 * t
-            g = 0.70 * (1.0 - t)
-            b = 0.70 * (1.0 - t)
+            r = (1.0 * (1.0 - t) + 0.40 * t)
+            g = (0.68 * (1.0 - t)**1.5 + 0.0 * t)
+            b = (0.0 * (1.0 - t) + 0.05 * t)
             lut.SetTableValue(i, r, g, b, 1.0)
         lut.Build()
         return lut
@@ -429,11 +448,10 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.picker_left.AddPickList(self.left_actor_nodes)
         self.picker_left.PickFromListOn()
 
-        # Lookup Tables for Volume A and B
         self.lut_a = self.create_lut_a()
         self.lut_b = self.create_lut_b()
 
-        # Volume A Parallel Edges (Blue)
+        # Volume A Parallel Edges (Cyan -> Navy Blue)
         self.left_chains_a_polydata = vtk.vtkPolyData()
         self.left_chains_a_mapper = vtk.vtkPolyDataMapper()
         self.left_chains_a_mapper.SetInputData(self.left_chains_a_polydata)
@@ -442,10 +460,10 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         self.left_actor_chains_a = vtk.vtkActor()
         self.left_actor_chains_a.SetMapper(self.left_chains_a_mapper)
-        self.left_actor_chains_a.GetProperty().SetLineWidth(1.8)
+        self.left_actor_chains_a.GetProperty().SetLineWidth(1.0)
         self.ren_left.AddActor(self.left_actor_chains_a)
 
-        # Volume B Parallel Edges (Red)
+        # Volume B Parallel Edges (Amber -> Crimson Red)
         self.left_chains_b_polydata = vtk.vtkPolyData()
         self.left_chains_b_mapper = vtk.vtkPolyDataMapper()
         self.left_chains_b_mapper.SetInputData(self.left_chains_b_polydata)
@@ -454,7 +472,7 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         self.left_actor_chains_b = vtk.vtkActor()
         self.left_actor_chains_b.SetMapper(self.left_chains_b_mapper)
-        self.left_actor_chains_b.GetProperty().SetLineWidth(1.8)
+        self.left_actor_chains_b.GetProperty().SetLineWidth(1.0)
         self.ren_left.AddActor(self.left_actor_chains_b)
 
         self.splitter.addWidget(left_container)
@@ -518,7 +536,7 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         self.right_actor_chains_a = vtk.vtkActor()
         self.right_actor_chains_a.SetMapper(self.right_chains_a_mapper)
-        self.right_actor_chains_a.GetProperty().SetLineWidth(1.8)
+        self.right_actor_chains_a.GetProperty().SetLineWidth(1.0)
         self.ren_right.AddActor(self.right_actor_chains_a)
 
         # Volume B Parallel Edges (Right Panel)
@@ -530,7 +548,7 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         self.right_actor_chains_b = vtk.vtkActor()
         self.right_actor_chains_b.SetMapper(self.right_chains_b_mapper)
-        self.right_actor_chains_b.GetProperty().SetLineWidth(1.8)
+        self.right_actor_chains_b.GetProperty().SetLineWidth(1.0)
         self.ren_right.AddActor(self.right_actor_chains_b)
 
         self.splitter.addWidget(right_container)
@@ -547,6 +565,9 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.enable_camera_sync(checked)
         self.vtk_left.GetRenderWindow().Render()
         self.vtk_right.GetRenderWindow().Render()
+
+    def on_edge_mode_changed(self, index):
+        self.update_left_visualization(threshold_percentile=self.threshold_slider.value())
 
     def on_left_interaction(self, obj, event):
         if self.lock_camera_checkbox.isChecked():
@@ -567,14 +588,33 @@ class DualPanelForceChainBuilder(QMainWindow):
         weights_matrix_b = {}
 
         min_w_threshold = np.percentile(self.raw_weights, self.threshold_slider.value()) if len(self.raw_weights) > 0 else 0.0
+        mode = self.edge_mode_combo.currentText()
 
         for (u, v, wa, wb) in self.all_edges:
-            if wa >= min_w_threshold:
-                weights_matrix_a[(u, v)] = wa
-                weights_matrix_a[(v, u)] = wa
-            if wb >= min_w_threshold:
-                weights_matrix_b[(u, v)] = wb
-                weights_matrix_b[(v, u)] = wb
+            edge_a_active = (wa >= min_w_threshold)
+            edge_b_active = (wb >= min_w_threshold)
+
+            if mode == "Only from A":
+                if edge_a_active and not edge_b_active:
+                    weights_matrix_a[(u, v)] = wa
+                    weights_matrix_a[(v, u)] = wa
+            elif mode == "Only from B":
+                if edge_b_active and not edge_a_active:
+                    weights_matrix_b[(u, v)] = wb
+                    weights_matrix_b[(v, u)] = wb
+            elif mode == "Both (Intersection)":
+                if edge_a_active and edge_b_active:
+                    weights_matrix_a[(u, v)] = wa
+                    weights_matrix_a[(v, u)] = wa
+                    weights_matrix_b[(u, v)] = wb
+                    weights_matrix_b[(v, u)] = wb
+            else:  # Default (Union)
+                if edge_a_active:
+                    weights_matrix_a[(u, v)] = wa
+                    weights_matrix_a[(v, u)] = wa
+                if edge_b_active:
+                    weights_matrix_b[(u, v)] = wb
+                    weights_matrix_b[(v, u)] = wb
 
         for n in selected_list:
             weights_matrix_a[(n, n)] = self.node_weights_a[n]
@@ -588,26 +628,43 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         self.slider_label.setText(f"Weight Threshold Value: {min_weight_threshold:.2f}")
 
-        # 1. Filter active edges for Volume A and Volume B individually
         self.active_edges_a = []
         self.active_edges_b = []
         nodes_with_edges = set()
+        mode = self.edge_mode_combo.currentText()
 
+        # Filter active edges according to threshold and dropdown selection mode
         for (u, v, wa, wb) in self.all_edges:
             edge_a_active = (wa >= min_weight_threshold)
             edge_b_active = (wb >= min_weight_threshold)
 
-            if edge_a_active:
-                self.active_edges_a.append((u, v, wa))
-                nodes_with_edges.add(u)
-                nodes_with_edges.add(v)
+            if mode == "Only from A":
+                if edge_a_active and not edge_b_active:
+                    self.active_edges_a.append((u, v, wa))
+                    nodes_with_edges.add(u)
+                    nodes_with_edges.add(v)
+            elif mode == "Only from B":
+                if edge_b_active and not edge_a_active:
+                    self.active_edges_b.append((u, v, wb))
+                    nodes_with_edges.add(u)
+                    nodes_with_edges.add(v)
+            elif mode == "Both (Intersection)":
+                if edge_a_active and edge_b_active:
+                    self.active_edges_a.append((u, v, wa))
+                    self.active_edges_b.append((u, v, wb))
+                    nodes_with_edges.add(u)
+                    nodes_with_edges.add(v)
+            else:  # Default (Union)
+                if edge_a_active:
+                    self.active_edges_a.append((u, v, wa))
+                    nodes_with_edges.add(u)
+                    nodes_with_edges.add(v)
+                if edge_b_active:
+                    self.active_edges_b.append((u, v, wb))
+                    nodes_with_edges.add(u)
+                    nodes_with_edges.add(v)
 
-            if edge_b_active:
-                self.active_edges_b.append((u, v, wb))
-                nodes_with_edges.add(u)
-                nodes_with_edges.add(v)
-
-        # 2. Node removal rule: Keep node only if connected to at least one active edge in Vol A OR Vol B
+        # Node removal rule: Keep node only if connected to at least one active edge
         self.active_visible_nodes_left = sorted(list(nodes_with_edges))
 
         if len(self.active_visible_nodes_left) == 0:
@@ -626,8 +683,7 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.update_particle_colors()
         self.left_actor_nodes.SetVisibility(True)
 
-        # 3. Build Parallel Edges for Volume A (Blue) and Volume B (Red)
-        delta_offset = 0.008  # Parallel separation distance
+        delta_offset = 0.008
 
         # --- Volume A Parallel Lines ---
         lines_a = vtk.vtkCellArray()

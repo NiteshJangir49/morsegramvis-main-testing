@@ -1,105 +1,143 @@
 import os
-import ast
+import sys
 import numpy as np
 import pandas as pd
-import sys
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QLabel, QSlider, QComboBox, QCheckBox
+    QLabel, QSlider, QComboBox, QCheckBox, QLineEdit, QPushButton
 )
 from PySide6.QtCore import Qt
 import vtkmodules.all as vtk
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
 
-def load_dual_node_volume_data(particles_csv, node_vtp_path_A, node_vtp_path_B):
-    if not os.path.exists(particles_csv) or not os.path.exists(node_vtp_path_A) or not os.path.exists(node_vtp_path_B):
-        print(f"[Error] Missing path references:\nCSV: {particles_csv}\nVTP A: {node_vtp_path_A}\nVTP B: {node_vtp_path_B}")
-        return None, None, None
+# ==============================================================================
+# DATA LOADING UTILITY (Dynamic Assembly & Timestep)
+# ==============================================================================
+def load_real_and_predicted_data(assembly_id=58, timestep=80):
+    """Loads 3D coordinates, actual NPMNCF (Vol A, normalized), and GNN predicted NPMNCF (Vol B)."""
+    actual_dir = os.path.join("real_dataset", "actual_data")
+    predicted_dir = os.path.join("real_dataset", "predicted_data")
 
-    df_part = pd.read_csv(particles_csv)
-    center_coords = []
-    for _, row in df_part.iterrows():
-        try:
-            centroid = row['centroid']
-            if isinstance(centroid, str):
-                centroid = ast.literal_eval(centroid.strip())
-            cx, cy, cz = float(centroid[0]), float(centroid[1]), float(centroid[2])
-            if np.isnan(cx) or np.isnan(cy) or np.isnan(cz): continue
-            center_coords.append([cx, cy, cz])
-        except Exception:
-            continue
-    center_coords = np.array(center_coords, dtype=np.float32)
+    def resolve_path(directory, filename):
+        path_in_dir = os.path.join(directory, filename)
+        if os.path.exists(path_in_dir):
+            return path_in_dir
+        if os.path.exists(filename):
+            return filename
+        return path_in_dir
 
-    reader_A = vtk.vtkXMLPolyDataReader()
-    reader_A.SetFileName(node_vtp_path_A)
-    reader_A.Update()
-    poly_A = reader_A.GetOutput()
-    
-    reader_B = vtk.vtkXMLPolyDataReader()
-    reader_B.SetFileName(node_vtp_path_B)
-    reader_B.Update()
-    poly_B = reader_B.GetOutput()
+    pos_x_path = resolve_path(actual_dir, f"{assembly_id}_{timestep}_ball_pos_x.tab")
+    pos_y_path = resolve_path(actual_dir, f"{assembly_id}_{timestep}_ball_pos_y.tab")
+    pos_z_path = resolve_path(actual_dir, f"{assembly_id}_{timestep}_ball_pos_z.tab")
+    actual_npmncf_path = resolve_path(actual_dir, f"{assembly_id}_{timestep}_ball_NPMNCF.tab")
 
-    if not poly_A or not poly_B or not poly_A.GetPointData().GetScalars() or not poly_B.GetPointData().GetScalars():
-        print("[Error] VTP structures missing valid node scalar arrays.")
-        return None, None, None
+    pred_npmncf_path = resolve_path(predicted_dir, f"assembly_{assembly_id:02d}_timestep_{timestep:02d}_predicted_npmncf.csv")
+    if not os.path.exists(pred_npmncf_path):
+        pred_npmncf_path = resolve_path(predicted_dir, f"assembly_{assembly_id}_timestep_{timestep}_predicted_npmncf.csv")
 
-    scalars_A = poly_A.GetPointData().GetScalars()
-    scalars_B = poly_B.GetPointData().GetScalars()
-    num_points = scalars_A.GetNumberOfValues()
-    
-    weights_A = np.zeros(num_points, dtype=np.float32)
-    weights_B = np.zeros(num_points, dtype=np.float32)
-    for i in range(num_points):
-        weights_A[i] = scalars_A.GetValue(i)
-        weights_B[i] = scalars_B.GetValue(i)
+    for path in [pos_x_path, pos_y_path, pos_z_path, actual_npmncf_path, pred_npmncf_path]:
+        if not os.path.exists(path):
+            print(f"[Error] Missing required file for Timestep {timestep}: {path}")
+            return None, None, None
 
-    return center_coords, weights_A, weights_B
+    # 1. Load 3D Coordinates
+    df_x = pd.read_csv(pos_x_path, sep=r'\s+', skiprows=2, header=None, names=['ball_id', 'x'])
+    df_y = pd.read_csv(pos_y_path, sep=r'\s+', skiprows=2, header=None, names=['ball_id', 'y'])
+    df_z = pd.read_csv(pos_z_path, sep=r'\s+', skiprows=2, header=None, names=['ball_id', 'z'])
+
+    df_x['ball_id'] = df_x['ball_id'].astype(int)
+    df_y['ball_id'] = df_y['ball_id'].astype(int)
+    df_z['ball_id'] = df_z['ball_id'].astype(int)
+
+    df_coords = df_x.merge(df_y, on='ball_id').merge(df_z, on='ball_id')
+
+    # 2. Load Actual NPMNCF (Volume A) and normalize
+    df_actual = pd.read_csv(actual_npmncf_path, sep=r'\s+', skiprows=2, header=None, names=['ball_id', 'npmncf_raw'])
+    df_actual['ball_id'] = pd.to_numeric(df_actual['ball_id'], errors='coerce')
+    df_actual.dropna(subset=['ball_id'], inplace=True)
+    df_actual['ball_id'] = df_actual['ball_id'].astype(int)
+
+    raw_mean_force = df_actual['npmncf_raw'].mean()
+    df_actual['node_weight_actual'] = df_actual['npmncf_raw'] / raw_mean_force if raw_mean_force > 0 else df_actual['npmncf_raw']
+
+    normalized_mean_force = df_actual['node_weight_actual'].mean()
+    print("\n" + "=" * 60)
+    print(f"FORCE NORMALIZATION CHECK (Timestep {timestep} - Volume A):")
+    print(f"  Raw Force Mean (raw NPMNCF)        : {raw_mean_force:.6f}")
+    print(f"  Normalized Force Mean (Vol A Nodes): {normalized_mean_force:.6f}")
+    print("=" * 60 + "\n")
+
+    # 3. Load GNN Predicted NPMNCF (Volume B)
+    df_pred = pd.read_csv(pred_npmncf_path)
+
+    df_nodes = df_pred.merge(df_actual[['ball_id', 'node_weight_actual']], on='ball_id', how='inner')
+    df_nodes = df_nodes.merge(df_coords, on='ball_id', how='inner')
+
+    coords = df_nodes[['x', 'y', 'z']].values.astype(np.float32) * 100.0
+    weights_A = df_nodes['node_weight_actual'].values.astype(np.float32)
+    weights_B = df_nodes['predicted_npmncf'].values.astype(np.float32)
+
+    return coords, weights_A, weights_B
 
 
+# ==============================================================================
+# SPATIAL HEIGHTMAP & DIFFERENCE VIEWER
+# ==============================================================================
 class FullHeightmapViewer(QMainWindow):
-    def __init__(self, center_coords, weights_A, weights_B, base_dir=None):
+    def __init__(self, initial_assembly=58, initial_timestep=80, base_dir=None):
         super().__init__()
-        self.setWindowTitle("DiffSeer View - Spatial Volume & Difference Viewer")
-        self.setGeometry(100, 100, 1600, 850)
+        self.setWindowTitle(f"DiffSeer View - Spatial Heightmap (Assembly {initial_assembly}, Timestep {initial_timestep})")
+        self.setGeometry(100, 100, 1750, 850)
 
-        self.center_coords = center_coords
-        self.weights_A = weights_A
-        self.weights_B = weights_B
+        self.current_assembly = initial_assembly
+        self.current_timestep = initial_timestep
         self.base_dir = base_dir
-        
-        self.bd_grains_dir = os.path.join(base_dir, "dataset_files", "Steel Beads", "bd_grains") if base_dir else None
 
-        self.vtp_surface_points = None
-        self.vtp_weights_A = None
-        self.vtp_weights_B = None
+        self.volume_points = None
+        self.volume_weights_A = None
+        self.volume_weights_B = None
 
-        self.min_coords = center_coords.min(axis=0)
-        self.max_coords = center_coords.max(axis=0)
-        
-        from scipy.spatial import cKDTree
-        tree = cKDTree(self.center_coords)
-        distances, _ = tree.query(self.center_coords, k=2)
-        self.max_safe_particle_radius = (np.min(distances[:, 1]) if len(distances) > 0 else 2.0) * 0.65
+        coords, w_A, w_B = load_real_and_predicted_data(self.current_assembly, self.current_timestep)
+        self.center_coords = coords
+        self.weights_A = w_A
+        self.weights_B = w_B
+
+        self.compute_geometry_metrics()
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
         control_layout = QHBoxLayout()
-        
+
+        # Timestep Text Entry
+        control_layout.addWidget(QLabel("<b>Timestep:</b>"))
+        self.timestep_input = QLineEdit(str(self.current_timestep))
+        self.timestep_input.setFixedWidth(50)
+        self.timestep_input.setAlignment(Qt.AlignCenter)
+        self.timestep_input.returnPressed.connect(self.handle_timestep_change)
+        control_layout.addWidget(self.timestep_input)
+
+        self.load_btn = QPushButton("Load")
+        self.load_btn.setFixedWidth(55)
+        self.load_btn.setStyleSheet("font-weight: bold; background-color: #005588; color: white;")
+        self.load_btn.clicked.connect(self.handle_timestep_change)
+        control_layout.addWidget(self.load_btn)
+
+        control_layout.addSpacing(10)
+
         control_layout.addWidget(QLabel("<b>Mode:</b>"))
         self.mode_dropdown = QComboBox()
         self.mode_dropdown.addItems([
             "Value Heightmaps",
             "A-B difference Heightmap"
         ])
-        self.mode_dropdown.currentIndexChanged.connect(self.handle_mode_switch)
+        self.mode_dropdown.currentIndexChanged.connect(lambda idx: self.handle_mode_switch(idx, reset_cam=True))
         control_layout.addWidget(self.mode_dropdown)
-        
-        control_layout.addSpacing(15)
+
+        control_layout.addSpacing(10)
 
         control_layout.addWidget(QLabel("<b>Histogram Source:</b>"))
         self.hist_source_combo = QComboBox()
@@ -110,88 +148,101 @@ class FullHeightmapViewer(QMainWindow):
         self.hist_source_combo.currentIndexChanged.connect(self.handle_hist_source_switch)
         control_layout.addWidget(self.hist_source_combo)
 
-        control_layout.addSpacing(15)
+        control_layout.addSpacing(10)
 
         self.diff_toggle = QCheckBox("Volume Difference View")
         self.diff_toggle.setChecked(True)
         self.diff_toggle.stateChanged.connect(self.handle_diff_toggle_change)
         control_layout.addWidget(self.diff_toggle)
 
-        control_layout.addSpacing(15)
+        control_layout.addSpacing(10)
 
-        self.bbox_toggle = QCheckBox("Show Particle Bounding Box")
+        self.bbox_toggle = QCheckBox("Show Bounding Box")
         self.bbox_toggle.setChecked(False)
         self.bbox_toggle.stateChanged.connect(self.handle_bbox_toggle)
         control_layout.addWidget(self.bbox_toggle)
 
-        control_layout.addSpacing(15)
+        control_layout.addSpacing(10)
 
-        control_layout.addWidget(QLabel("<b>Projection Axis:</b>"))
+        control_layout.addWidget(QLabel("<b>Axis:</b>"))
         self.axis_dropdown = QComboBox()
         self.axis_dropdown.addItems(["Z-Axis", "Y-Axis", "X-Axis"])
         self.axis_dropdown.currentIndexChanged.connect(self.handle_axis_switch)
         control_layout.addWidget(self.axis_dropdown)
-        
-        control_layout.addSpacing(15)
-        
-        self.height_label = QLabel("<b>Height Scale: 20%</b>")
+
+        control_layout.addSpacing(10)
+
+        self.height_label = QLabel("<b>Height: 20%</b>")
         control_layout.addWidget(self.height_label)
         self.height_slider = QSlider(Qt.Horizontal)
-        self.height_slider.setMinimum(0)   
-        self.height_slider.setMaximum(100)  
-        self.height_slider.setValue(20)   
-        self.height_slider.setFixedWidth(80)
-        self.height_slider.valueChanged.connect(self.handle_geometry_update)
+        self.height_slider.setMinimum(0)
+        self.height_slider.setMaximum(100)
+        self.height_slider.setValue(20)
+        self.height_slider.setFixedWidth(70)
+        self.height_slider.valueChanged.connect(lambda: self.handle_geometry_update(reset_cam=False))
         control_layout.addWidget(self.height_slider)
 
-        control_layout.addSpacing(15)
+        control_layout.addSpacing(10)
 
-        self.box_width_label = QLabel("<b>Box Width: 15%</b>")
+        self.box_width_label = QLabel("<b>Box: 15%</b>")
         control_layout.addWidget(self.box_width_label)
         self.box_width_slider = QSlider(Qt.Horizontal)
-        self.box_width_slider.setMinimum(0)   
-        self.box_width_slider.setMaximum(100)  
-        self.box_width_slider.setValue(15)   
-        self.box_width_slider.setFixedWidth(80)
+        self.box_width_slider.setMinimum(0)
+        self.box_width_slider.setMaximum(100)
+        self.box_width_slider.setValue(15)
+        self.box_width_slider.setFixedWidth(70)
         self.box_width_slider.valueChanged.connect(self.handle_box_width_update)
         control_layout.addWidget(self.box_width_slider)
 
-        control_layout.addSpacing(15)
+        control_layout.addSpacing(10)
 
-        self.particle_size_label = QLabel("<b>Particle Size: 50%</b>")
+        self.particle_size_label = QLabel("<b>Size: 50%</b>")
         control_layout.addWidget(self.particle_size_label)
         self.particle_size_slider = QSlider(Qt.Horizontal)
         self.particle_size_slider.setMinimum(0)
         self.particle_size_slider.setMaximum(100)
         self.particle_size_slider.setValue(50)
-        self.particle_size_slider.setFixedWidth(80)
+        self.particle_size_slider.setFixedWidth(70)
         self.particle_size_slider.valueChanged.connect(self.handle_particle_size_update)
         control_layout.addWidget(self.particle_size_slider)
 
-        control_layout.addSpacing(15)
-        
-        self.opacity_label_A = QLabel("<b>Vol A Opacity: 1.00</b>")
+        control_layout.addSpacing(10)
+
+        # Opacity Contrast / Power Curve Slider: γ in [0.5, 4.0]
+        self.contrast_label = QLabel("<b>Opacity Contrast: 1.0x</b>")
+        control_layout.addWidget(self.contrast_label)
+        self.contrast_slider = QSlider(Qt.Horizontal)
+        self.contrast_slider.setMinimum(10)   # 10 -> γ = 1.0 (linear baseline)
+        self.contrast_slider.setMaximum(40)   # 40 -> γ = 4.0 (steep suppression of low values)
+        self.contrast_slider.setValue(10)
+        self.contrast_slider.setFixedWidth(75)
+        self.contrast_slider.valueChanged.connect(self.handle_contrast_change)
+        control_layout.addWidget(self.contrast_slider)
+
+        control_layout.addSpacing(10)
+
+        self.opacity_label_A = QLabel("<b>Vol A: 1.00</b>")
         control_layout.addWidget(self.opacity_label_A)
         self.opacity_slider_A = QSlider(Qt.Horizontal)
         self.opacity_slider_A.setMinimum(0)
         self.opacity_slider_A.setMaximum(100)
         self.opacity_slider_A.setValue(100)
-        self.opacity_slider_A.setFixedWidth(80)
+        self.opacity_slider_A.setFixedWidth(70)
         self.opacity_slider_A.valueChanged.connect(self.handle_opacity_A_change)
         control_layout.addWidget(self.opacity_slider_A)
 
-        control_layout.addSpacing(15)
+        control_layout.addSpacing(10)
 
-        self.opacity_label_B = QLabel("<b>Vol B Opacity: 1.00</b>")
+        self.opacity_label_B = QLabel("<b>Vol B: 1.00</b>")
         control_layout.addWidget(self.opacity_label_B)
         self.opacity_slider_B = QSlider(Qt.Horizontal)
         self.opacity_slider_B.setMinimum(0)
         self.opacity_slider_B.setMaximum(100)
         self.opacity_slider_B.setValue(100)
-        self.opacity_slider_B.setFixedWidth(80)
+        self.opacity_slider_B.setFixedWidth(70)
         self.opacity_slider_B.valueChanged.connect(self.handle_opacity_B_change)
         control_layout.addWidget(self.opacity_slider_B)
-        
+
         control_layout.addStretch()
         main_layout.addLayout(control_layout)
 
@@ -208,20 +259,21 @@ class FullHeightmapViewer(QMainWindow):
         self.renderer.SetOcclusionRatio(0.0)
         self.renderer.SetMaximumNumberOfPeels(4)
 
+        # Lookup Tables for Heightmap Bars
         self.lut_diff = vtk.vtkLookupTable()
         self.lut_diff.SetNumberOfTableValues(2)
-        self.lut_diff.SetTableValue(0, 0.9, 0.2, 0.2, 1.0) 
-        self.lut_diff.SetTableValue(1, 0.2, 0.5, 0.9, 1.0) 
+        self.lut_diff.SetTableValue(0, 0.9, 0.2, 0.2, 1.0)
+        self.lut_diff.SetTableValue(1, 0.2, 0.5, 0.9, 1.0)
         self.lut_diff.Build()
 
         self.lut_A = vtk.vtkLookupTable()
         self.lut_A.SetNumberOfTableValues(1)
-        self.lut_A.SetTableValue(0, 0.9, 0.6, 0.1, 1.0)
+        self.lut_A.SetTableValue(0, 0.1, 0.6, 0.9, 1.0)
         self.lut_A.Build()
 
         self.lut_B = vtk.vtkLookupTable()
         self.lut_B.SetNumberOfTableValues(1)
-        self.lut_B.SetTableValue(0, 0.1, 0.6, 0.9, 1.0)
+        self.lut_B.SetTableValue(0, 0.9, 0.5, 0.1, 1.0)
         self.lut_B.Build()
 
         self.actor_A = vtk.vtkActor()
@@ -263,21 +315,82 @@ class FullHeightmapViewer(QMainWindow):
         self.vtkWidget.SetInteractorStyle(vtk.vtkInteractorStyleTrackballCamera())
 
         self.mode_dropdown.setCurrentIndex(1)
-        self.handle_axis_switch(0)
+        self.handle_geometry_update(reset_cam=True)
+
+    def compute_geometry_metrics(self):
+        self.min_coords = self.center_coords.min(axis=0)
+        self.max_coords = self.center_coords.max(axis=0)
+
+        from scipy.spatial import cKDTree
+        tree = cKDTree(self.center_coords)
+        distances, _ = tree.query(self.center_coords, k=2)
+        self.particle_radius = (np.median(distances[:, 1]) if len(distances) > 0 else 2.0) * 0.5
+        self.max_safe_particle_radius = self.particle_radius * 1.3
+
+    def handle_timestep_change(self):
+        text = self.timestep_input.text().strip()
+        try:
+            new_timestep = int(text)
+        except ValueError:
+            print(f"[Warning] Invalid timestep integer: '{text}'")
+            return
+
+        coords, w_A, w_B = load_real_and_predicted_data(self.current_assembly, new_timestep)
+        if coords is None or len(w_A) == 0:
+            print(f"[Warning] Failed to load data for Timestep {new_timestep}. Keeping previous state.")
+            return
+
+        self.current_timestep = new_timestep
+        self.center_coords = coords
+        self.weights_A = w_A
+        self.weights_B = w_B
+        self.volume_points = None
+        self.volume_weights_A = None
+        self.volume_weights_B = None
+
+        self.compute_geometry_metrics()
+        self.setWindowTitle(f"DiffSeer View - Spatial Heightmap (Assembly {self.current_assembly}, Timestep {self.current_timestep})")
+
+        if self.hist_source_combo.currentIndex() == 1:
+            self.generate_volumetric_sphere_sampling()
+
+        if self.bbox_toggle.isChecked():
+            min_b, max_b = self.get_full_ensemble_bounds()
+            self.cube_source_bbox.SetBounds(
+                min_b[0], max_b[0],
+                min_b[1], max_b[1],
+                min_b[2], max_b[2]
+            )
+            self.cube_source_bbox.Update()
+
+        self.handle_geometry_update(reset_cam=False)
+
+    def generate_volumetric_sphere_sampling(self):
+        """Generates internal volumetric/surface sample points for each spherical particle."""
+        num_samples_per_particle = 24
+        indices = np.arange(0, num_samples_per_particle, dtype=float) + 0.5
+        phi = np.arccos(1.0 - 2.0 * indices / num_samples_per_particle)
+        theta = np.pi * (1.0 + 5.0 ** 0.5) * indices
+
+        r_offsets = np.c_[
+            np.cos(theta) * np.sin(phi),
+            np.sin(theta) * np.sin(phi),
+            np.cos(phi)
+        ] * (self.particle_radius * 0.85)
+
+        r_offsets = np.vstack([[[0.0, 0.0, 0.0]], r_offsets])
+        n_offsets = len(r_offsets)
+
+        all_pts = (self.center_coords[:, None, :] + r_offsets[None, :, :]).reshape(-1, 3)
+
+        self.volume_points = all_pts
+        self.volume_weights_A = np.repeat(self.weights_A, n_offsets)
+        self.volume_weights_B = np.repeat(self.weights_B, n_offsets)
 
     def get_full_ensemble_bounds(self):
-        """Computes true global spatial min/max bounds across particle surfaces."""
-        if self.vtp_surface_points is None:
-            self.load_full_grain_ensemble_backend()
-
-        if self.vtp_surface_points is not None and len(self.vtp_surface_points) > 0:
-            min_b = self.vtp_surface_points.min(axis=0)
-            max_b = self.vtp_surface_points.max(axis=0)
-        else:
-            r = self.max_safe_particle_radius
-            min_b = self.min_coords - r
-            max_b = self.max_coords + r
-
+        r = self.max_safe_particle_radius
+        min_b = self.min_coords - r
+        max_b = self.max_coords + r
         return min_b, max_b
 
     def handle_bbox_toggle(self, state):
@@ -292,69 +405,25 @@ class FullHeightmapViewer(QMainWindow):
             self.cube_source_bbox.Update()
 
         self.actor_bbox.SetVisibility(is_visible)
+        self.renderer.ResetCameraClippingRange()
         self.vtkWidget.GetRenderWindow().Render()
 
-    def load_full_grain_ensemble_backend(self):
-        if not self.bd_grains_dir or not os.path.exists(self.bd_grains_dir):
-            print(f"[Error] Grain directory missing: {self.bd_grains_dir}")
-            return
-
-        vtp_files = sorted([
-            os.path.join(self.bd_grains_dir, f) 
-            for f in os.listdir(self.bd_grains_dir) 
-            if f.endswith(".vtp")
-        ])
-
-        num_particles = min(len(self.center_coords), len(self.weights_A), len(vtp_files))
-        if num_particles == 0:
-            return
-
-        print(f"[Backend Data Sync] Loading fast point-cloud arrays across {num_particles} grains...")
-
-        all_pts_list = []
-        wA_list = []
-        wB_list = []
-
-        from vtkmodules.util.numpy_support import vtk_to_numpy
-
-        for i in range(num_particles):
-            wA = self.weights_A[i]
-            wB = self.weights_B[i]
-
-            reader = vtk.vtkXMLPolyDataReader()
-            reader.SetFileName(vtp_files[i])
-            reader.Update()
-            poly = reader.GetOutput()
-
-            if not poly or poly.GetNumberOfPoints() == 0:
-                continue
-
-            n_pts = poly.GetNumberOfPoints()
-            pts_np = vtk_to_numpy(poly.GetPoints().GetData())
-
-            all_pts_list.append(pts_np)
-            wA_list.append(np.full(n_pts, wA, dtype=np.float32))
-            wB_list.append(np.full(n_pts, wB, dtype=np.float32))
-
-        self.vtp_surface_points = np.vstack(all_pts_list)
-        self.vtp_weights_A = np.concatenate(wA_list)
-        self.vtp_weights_B = np.concatenate(wB_list)
-
-        print(f"[Backend Data Sync] Loaded {len(self.vtp_surface_points)} dense sampling points.")
-
     def handle_hist_source_switch(self, index):
-        if index == 1 and self.vtp_surface_points is None:
-            self.load_full_grain_ensemble_backend()
+        if index == 1 and self.volume_points is None:
+            self.generate_volumetric_sphere_sampling()
 
-        self.handle_geometry_update()
+        self.handle_geometry_update(reset_cam=False)
 
     def get_active_dataset_source(self, is_diff=False, requested_weights=None):
-        if self.hist_source_combo.currentIndex() == 1 and self.vtp_surface_points is not None:
-            coords = self.vtp_surface_points
+        if self.hist_source_combo.currentIndex() == 1:
+            if self.volume_points is None:
+                self.generate_volumetric_sphere_sampling()
+
+            coords = self.volume_points
             if is_diff:
-                active_weights = self.vtp_weights_A - self.vtp_weights_B
+                active_weights = self.volume_weights_A - self.volume_weights_B
             else:
-                active_weights = self.vtp_weights_A if np.array_equal(requested_weights, self.weights_A) else self.vtp_weights_B
+                active_weights = self.volume_weights_A if np.array_equal(requested_weights, self.weights_A) else self.volume_weights_B
         else:
             coords = self.center_coords
             if is_diff:
@@ -370,18 +439,8 @@ class FullHeightmapViewer(QMainWindow):
 
         coords, active_weights = self.get_active_dataset_source(is_diff=is_diff, requested_weights=weights)
 
-        # 1. Filter out empty background space (where both Vol A and Vol B are 0)
-        if self.hist_source_combo.currentIndex() == 1 and self.vtp_surface_points is not None:
-            wA = self.vtp_weights_A
-            wB = self.vtp_weights_B
-        else:
-            wA = self.weights_A
-            wB = self.weights_B
+        non_empty_mask = np.abs(active_weights) > 1e-6 if not is_diff else np.abs(active_weights) >= 1e-4
 
-        # Non-empty mask: At least one volume has a non-zero scalar value
-        non_empty_mask = (np.abs(wA) > 1e-6) | (np.abs(wB) > 1e-6)
-
-        # Apply mask to coordinates and weights
         valid_coords = coords[non_empty_mask]
         valid_weights = active_weights[non_empty_mask]
 
@@ -410,7 +469,6 @@ class FullHeightmapViewer(QMainWindow):
         u_edges = np.linspace(min_u, max_u, grid_res_u + 1)
         v_edges = np.linspace(min_v, max_v, grid_res_v + 1)
 
-        # 2. Histogram binning now divides ONLY by the count of non-empty points
         counts, _, _ = np.histogram2d(u_pts, v_pts, bins=[u_edges, v_edges])
         sums, _, _ = np.histogram2d(u_pts, v_pts, bins=[u_edges, v_edges], weights=valid_weights)
 
@@ -481,20 +539,25 @@ class FullHeightmapViewer(QMainWindow):
 
         self.mapper_nodes = vtk.vtkPolyDataMapper()
         self.mapper_nodes.SetInputConnection(self.glyph_filter.GetOutputPort())
-        self.mapper_nodes.SetLookupTable(self.lut_diff)
-        self.mapper_nodes.SetScalarRange(-1.0, 1.0)
+        self.mapper_nodes.SetScalarModeToUsePointData()
+        self.mapper_nodes.SetColorModeToDirectScalars()
 
         self.actor_nodes.SetMapper(self.mapper_nodes)
         self.actor_nodes.GetProperty().LightingOn()
         self.actor_nodes.GetProperty().SetAmbient(0.3)
         self.actor_nodes.GetProperty().SetDiffuse(0.7)
-        
+
         self.mapper_nodes.SetResolveCoincidentTopologyToPolygonOffset()
         self.mapper_nodes.SetResolveCoincidentTopologyPolygonOffsetParameters(1.0, 1.0)
 
         self.update_particle_pipeline_arrays()
 
     def update_particle_pipeline_arrays(self):
+        """
+        Dynamically applies a non-linear power-law contrast curve (gamma) to particle opacity.
+        Increasing the slider suppresses low-magnitude particles (making them more transparent)
+        while boosting high-magnitude particles (keeping them solid and prominent).
+        """
         vtk_node_pts = vtk.vtkPoints()
         for pt in self.center_coords:
             vtk_node_pts.InsertNextPoint(pt[0], pt[1], pt[2])
@@ -505,61 +568,76 @@ class FullHeightmapViewer(QMainWindow):
         size_pct = slider_val / 100.0
         current_max_scale = self.max_safe_particle_radius * (size_pct * 3.0)
 
+        gamma = self.contrast_slider.value() / 10.0
+
         num_pts = len(self.center_coords)
         size_vectors = vtk.vtkFloatArray()
         size_vectors.SetNumberOfComponents(3)
         size_vectors.SetNumberOfTuples(num_pts)
 
-        color_scalars = vtk.vtkFloatArray()
-        color_scalars.SetNumberOfValues(num_pts)
+        rgba_colors = vtk.vtkUnsignedCharArray()
+        rgba_colors.SetNumberOfComponents(4)
+        rgba_colors.SetNumberOfTuples(num_pts)
 
         diff = self.weights_A - self.weights_B
         max_diff = np.max(np.abs(diff)) or 1.0
         is_dev_mode = self.diff_toggle.isChecked()
 
         if mode_idx == 1 and is_dev_mode:
-            self.mapper_nodes.ScalarVisibilityOn()
             for i, val in enumerate(diff):
                 if slider_val == 0:
-                    norm_size = 0.0  
+                    norm_size = 0.0
                 else:
                     norm_size = (abs(val) / max_diff) * current_max_scale
-                    norm_size = max(0.02, norm_size)  
-                
+                    norm_size = max(0.02, norm_size)
+
                 size_vectors.SetTuple3(i, norm_size, norm_size, norm_size)
-                color_scalars.SetValue(i, -0.5 if val >= 0 else 0.5)
+
+                mag_norm = np.clip(abs(val) / max_diff, 0.0, 1.0)
+                alpha = int(255.0 * (mag_norm ** gamma))
+                alpha = max(5, min(255, alpha))
+
+                if val >= 0:
+                    rgba_colors.SetTuple4(i, 230, 50, 50, alpha)
+                else:
+                    rgba_colors.SetTuple4(i, 50, 130, 230, alpha)
         else:
-            self.mapper_nodes.ScalarVisibilityOff()
-            self.actor_nodes.GetProperty().SetColor(1.0, 1.0, 1.0)
-            
+            w_max = max(np.max(self.weights_A), np.max(self.weights_B)) or 1.0
             for i in range(num_pts):
                 if slider_val == 0:
-                    norm_size = 0.0  
+                    norm_size = 0.0
                 else:
                     norm_size = max(0.05, current_max_scale * 0.3)
-                
+
                 size_vectors.SetTuple3(i, norm_size, norm_size, norm_size)
-                color_scalars.SetValue(i, 0.0)
+
+                mag_norm = np.clip(max(self.weights_A[i], self.weights_B[i]) / w_max, 0.0, 1.0)
+                alpha = int(255.0 * (mag_norm ** gamma))
+                alpha = max(5, min(255, alpha))
+
+                rgba_colors.SetTuple4(i, 240, 240, 240, alpha)
 
         self.poly_nodes.GetPointData().SetVectors(size_vectors)
-        self.poly_nodes.GetPointData().SetScalars(color_scalars)
-        
+        self.poly_nodes.GetPointData().SetScalars(rgba_colors)
+
         self.poly_nodes.Modified()
         self.glyph_filter.Update()
 
+    def handle_contrast_change(self, value):
+        gamma = value / 10.0
+        self.contrast_label.setText(f"<b>Opacity Contrast: {gamma:.1f}x</b>")
+        self.update_particle_pipeline_arrays()
+        self.vtkWidget.GetRenderWindow().Render()
+
     def handle_diff_toggle_change(self, state):
         self.update_particle_pipeline_arrays()
-        if self.mode_dropdown.currentIndex() == 1:
-            if self.diff_toggle.isChecked():
-                self.mapper_nodes.ScalarVisibilityOn()
-            else:
-                self.mapper_nodes.ScalarVisibilityOff()
-                self.actor_nodes.GetProperty().SetColor(1.0, 1.0, 1.0)
+        self.renderer.ResetCameraClippingRange()
         self.vtkWidget.GetRenderWindow().Render()
 
     def handle_particle_size_update(self, value):
-        self.particle_size_label.setText(f"<b>Particle Size: {int(value)}%</b>")
+        self.particle_size_label.setText(f"<b>Size: {int(value)}%</b>")
         self.update_particle_pipeline_arrays()
+        self.renderer.ResetCameraClippingRange()
         self.vtkWidget.GetRenderWindow().Render()
 
     def get_physical_box_width(self, axis_idx):
@@ -609,15 +687,15 @@ class FullHeightmapViewer(QMainWindow):
         axis_index = self.axis_dropdown.currentIndex()
         total_min = list(self.min_coords)
         total_max = list(self.max_coords)
-        
+
         active_actor = self.actor_diff if self.mode_dropdown.currentIndex() == 1 else self.actor_A
-        
+
         if active_actor and active_actor.GetMapper() and active_actor.GetMapper().GetInput():
             bounds = active_actor.GetBounds()
             if bounds[0] <= bounds[1]:
                 total_min[axis_index] = min(total_min[axis_index], bounds[axis_index * 2])
                 total_max[axis_index] = max(total_max[axis_index], bounds[axis_index * 2 + 1])
-        
+
         span = total_max[axis_index] - total_min[axis_index]
         total_min[axis_index] -= span * 0.1
         total_max[axis_index] += span * 0.1
@@ -632,14 +710,14 @@ class FullHeightmapViewer(QMainWindow):
             self.vtkWidget.GetRenderWindow().Render()
 
     def handle_axis_switch(self, axis_index):
-        self.handle_geometry_update()
+        self.handle_geometry_update(reset_cam=False)
 
     def handle_box_width_update(self, value):
-        self.box_width_label.setText(f"<b>Box Width: {int(value)}%</b>")
-        self.handle_geometry_update()
+        self.box_width_label.setText(f"<b>Box: {int(value)}%</b>")
+        self.handle_geometry_update(reset_cam=False)
 
-    def handle_geometry_update(self):
-        self.height_label.setText(f"<b>Height Scale: {int(self.height_slider.value())}%</b>")
+    def handle_geometry_update(self, reset_cam=False):
+        self.height_label.setText(f"<b>Height: {int(self.height_slider.value())}%</b>")
         current_scale = self.get_mapped_height_scale()
         axis_index = self.axis_dropdown.currentIndex()
 
@@ -653,9 +731,9 @@ class FullHeightmapViewer(QMainWindow):
         mapper_diff = self.generate_spatial_histogram_mesh(diff_weights, axis_index, self.lut_diff, current_scale, is_diff=True)
         self.actor_diff.SetMapper(mapper_diff)
 
-        self.handle_mode_switch(self.mode_dropdown.currentIndex())
+        self.handle_mode_switch(self.mode_dropdown.currentIndex(), reset_cam=reset_cam)
 
-    def handle_mode_switch(self, index):
+    def handle_mode_switch(self, index, reset_cam=False):
         if index == 0:
             self.diff_toggle.setVisible(False)
             self.diff_toggle.setEnabled(False)
@@ -663,12 +741,12 @@ class FullHeightmapViewer(QMainWindow):
             self.actor_A.SetVisibility(True)
             self.actor_B.SetVisibility(True)
             self.actor_diff.SetVisibility(False)
-            
+
             self.opacity_slider_B.setVisible(True)
             self.opacity_label_B.setVisible(True)
-            self.opacity_label_A.setText(f"<b>Vol A Opacity: {self.opacity_slider_A.value()/100.0:.2f}</b>")
-            self.opacity_label_B.setText(f"<b>Vol B Opacity: {self.opacity_slider_B.value()/100.0:.2f}</b>")
-            
+            self.opacity_label_A.setText(f"<b>Vol A: {self.opacity_slider_A.value()/100.0:.2f}</b>")
+            self.opacity_label_B.setText(f"<b>Vol B: {self.opacity_slider_B.value()/100.0:.2f}</b>")
+
             self.actor_A.GetProperty().SetOpacity(self.opacity_slider_A.value() / 100.0)
             self.actor_B.GetProperty().SetOpacity(self.opacity_slider_B.value() / 100.0)
         else:
@@ -678,49 +756,49 @@ class FullHeightmapViewer(QMainWindow):
             self.actor_A.SetVisibility(False)
             self.actor_B.SetVisibility(False)
             self.actor_diff.SetVisibility(True)
-            
+
             self.opacity_slider_B.setVisible(False)
             self.opacity_label_B.setVisible(False)
-            self.opacity_label_A.setText(f"<b>Diff Opacity: {self.opacity_slider_A.value()/100.0:.2f}</b>")
+            self.opacity_label_A.setText(f"<b>Diff: {self.opacity_slider_A.value()/100.0:.2f}</b>")
             self.actor_diff.GetProperty().SetOpacity(self.opacity_slider_A.value() / 100.0)
 
         self.update_particle_pipeline_arrays()
-        self.reset_camera_to_full_volume()
+
+        if reset_cam:
+            self.reset_camera_to_full_volume()
+        else:
+            self.renderer.ResetCameraClippingRange()
+            if hasattr(self, 'vtkWidget') and self.vtkWidget.GetRenderWindow():
+                self.vtkWidget.GetRenderWindow().Render()
 
     def handle_opacity_A_change(self, value):
         alpha = value / 100.0
         if self.mode_dropdown.currentIndex() == 0:
-            self.opacity_label_A.setText(f"<b>Vol A Opacity: {alpha:.2f}</b>")
+            self.opacity_label_A.setText(f"<b>Vol A: {alpha:.2f}</b>")
             if self.actor_A: self.actor_A.GetProperty().SetOpacity(alpha)
         else:
-            self.opacity_label_A.setText(f"<b>Diff Opacity: {alpha:.2f}</b>")
+            self.opacity_label_A.setText(f"<b>Diff: {alpha:.2f}</b>")
             if self.actor_diff: self.actor_diff.GetProperty().SetOpacity(alpha)
         self.vtkWidget.GetRenderWindow().Render()
 
     def handle_opacity_B_change(self, value):
         alpha = value / 100.0
         if self.mode_dropdown.currentIndex() == 0:
-            self.opacity_label_B.setText(f"<b>Vol B Opacity: {alpha:.2f}</b>")
+            self.opacity_label_B.setText(f"<b>Vol B: {alpha:.2f}</b>")
             if self.actor_B: self.actor_B.GetProperty().SetOpacity(alpha)
         self.vtkWidget.GetRenderWindow().Render()
+
 
 def main():
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
-    base_dir = r"C:/Users/nites/Downloads/morsegramvis-main/morsegramvis-main"
-    particles_file = os.path.join(base_dir, "dataset_files", "Steel Beads", "data", "all_particle_stats.csv")
-    node_vtp_A = os.path.join(base_dir, "dataset_files", "Steel Beads", "visualization", "node_network_volume_A.vtp")
-    node_vtp_B = os.path.join(base_dir, "dataset_files", "Steel Beads", "visualization", "node_network_volume_B.vtp")
-
-    center_coords, w_A, w_B = load_dual_node_volume_data(particles_file, node_vtp_A, node_vtp_B)
-    
-    if center_coords is None or len(w_A) == 0:
-        return
-
     app = QApplication(sys.argv)
-    viewer = FullHeightmapViewer(center_coords, w_A, w_B, base_dir=base_dir)
+
+    # Initial start: Assembly 58, Timestep 80
+    viewer = FullHeightmapViewer(initial_assembly=58, initial_timestep=80)
     viewer.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()

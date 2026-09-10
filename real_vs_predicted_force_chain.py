@@ -2,16 +2,16 @@ import os
 import sys
 import numpy as np
 import pandas as pd
-import networkx as nx
 
 import vtkmodules.all as vtk
 from vtkmodules.util.numpy_support import numpy_to_vtk
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QLabel, QPushButton, QSlider, QCheckBox, QComboBox, QSplitter, QFrame, QDialog
+    QLabel, QPushButton, QCheckBox, QComboBox, QSplitter, QFrame, QDialog, QLineEdit
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal, QRectF
+from PySide6.QtGui import QPainter, QColor, QBrush, QPen, QDoubleValidator, QFont
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
 # Matplotlib integration for Matrix Rendering
@@ -24,11 +24,169 @@ import matplotlib.colors as mcolors
 
 
 # ==============================================================================
-# DATA LOADING UTILITY (Assembly 58, Timestep 80)
+# CUSTOM DUAL-HANDLE RANGE SLIDER WIDGET WITH RULER TICKS & VALUE LABELS
+# ==============================================================================
+class RangeSlider(QWidget):
+    valuesChanged = Signal(int, int)
+
+    def __init__(self, minimum=0, maximum=100, low=0, high=100, parent=None):
+        super().__init__(parent)
+        self.min_val = minimum
+        self.max_val = maximum
+        self.low_val = low
+        self.high_val = high
+
+        self.max_force_val = 1.0
+
+        self.handle_radius = 6.5
+        self.active_handle = None
+
+        self.setMinimumHeight(44)
+        self.setFixedWidth(145)
+
+    def setMaxForceVal(self, max_val):
+        self.max_force_val = max(1e-5, float(max_val))
+        self.update()
+
+    def setValues(self, low, high):
+        self.low_val = max(self.min_val, min(low, self.max_val))
+        self.high_val = max(self.low_val, min(high, self.max_val))
+        self.update()
+        self.valuesChanged.emit(self.low_val, self.high_val)
+
+    def getValues(self):
+        return self.low_val, self.high_val
+
+    def _val_to_pos(self, val):
+        width = self.width() - 2 * self.handle_radius
+        if self.max_val == self.min_val:
+            return self.handle_radius
+        return self.handle_radius + (val - self.min_val) / (self.max_val - self.min_val) * width
+
+    def _pos_to_val(self, pos):
+        width = self.width() - 2 * self.handle_radius
+        if width <= 0:
+            return self.min_val
+        t = (pos - self.handle_radius) / width
+        val = self.min_val + t * (self.max_val - self.min_val)
+        if pos <= self.handle_radius:
+            return self.min_val
+        if pos >= self.width() - self.handle_radius:
+            return self.max_val
+        return int(round(max(self.min_val, min(val, self.max_val))))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        w = self.width()
+        cy = 13.0
+
+        track_rect = QRectF(self.handle_radius, cy - 2.5, w - 2 * self.handle_radius, 5)
+
+        # 1. Background Track
+        painter.setBrush(QBrush(QColor("#333333")))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(track_rect, 2.5, 2.5)
+
+        # 2. Active Span Between Low and High
+        low_x = self._val_to_pos(self.low_val)
+        high_x = self._val_to_pos(self.high_val)
+
+        span_rect = QRectF(low_x, cy - 2.5, max(0.0, high_x - low_x), 5)
+        painter.setBrush(QBrush(QColor("#00bcd4")))
+        painter.drawRoundedRect(span_rect, 2.5, 2.5)
+
+        # 3. Ruler Scale Ticks Below Track
+        major_pen = QPen(QColor("#999999"), 1.0)
+        minor_pen = QPen(QColor("#555555"), 0.8)
+
+        tick_top = cy + 6.0
+        for pct in range(0, 101, 10):
+            tx = self._val_to_pos(pct)
+            if pct % 50 == 0:
+                painter.setPen(major_pen)
+                painter.drawLine(int(tx), int(tick_top), int(tx), int(tick_top + 5.5))
+            elif pct % 20 == 0:
+                painter.setPen(minor_pen)
+                painter.drawLine(int(tx), int(tick_top), int(tx), int(tick_top + 3.5))
+            else:
+                painter.setPen(minor_pen)
+                painter.drawLine(int(tx), int(tick_top), int(tx), int(tick_top + 2.0))
+
+        # 4. Numeric Value Labels
+        font = QFont()
+        font.setPointSize(7)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("#aaaaaa"))
+
+        label_y = tick_top + 7.0
+        label_h = 13.0
+
+        pos_0 = self._val_to_pos(0)
+        pos_50 = self._val_to_pos(50)
+        pos_100 = self._val_to_pos(100)
+
+        mid_val = self.max_force_val / 2.0
+
+        rect_0 = QRectF(pos_0 - 15, label_y, 30, label_h)
+        painter.drawText(rect_0, Qt.AlignHCenter | Qt.AlignTop, "0")
+
+        rect_50 = QRectF(pos_50 - 20, label_y, 40, label_h)
+        painter.drawText(rect_50, Qt.AlignHCenter | Qt.AlignTop, f"{mid_val:.2f}")
+
+        rect_100 = QRectF(pos_100 - 25, label_y, 40, label_h)
+        painter.drawText(rect_100, Qt.AlignHCenter | Qt.AlignTop, f"{self.max_force_val:.2f}")
+
+        # 5. Interactive Handles
+        for x, color, border in [(low_x, QColor("#00e6ff"), QColor("#ffffff")), 
+                                 (high_x, QColor("#ff9800"), QColor("#ffffff"))]:
+            painter.setBrush(QBrush(color))
+            painter.setPen(QPen(border, 1.2))
+            painter.drawEllipse(QRectF(x - self.handle_radius, cy - self.handle_radius, 
+                                       2 * self.handle_radius, 2 * self.handle_radius))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            x = event.position().x()
+            low_x = self._val_to_pos(self.low_val)
+            high_x = self._val_to_pos(self.high_val)
+
+            d_low = abs(x - low_x)
+            d_high = abs(x - high_x)
+
+            if d_low <= d_high:
+                self.active_handle = 'low'
+                self.low_val = min(self._pos_to_val(x), self.high_val)
+            else:
+                self.active_handle = 'high'
+                self.high_val = max(self._pos_to_val(x), self.low_val)
+
+            self.update()
+            self.valuesChanged.emit(self.low_val, self.high_val)
+
+    def mouseMoveEvent(self, event):
+        if self.active_handle is not None:
+            x = event.position().x()
+            val = self._pos_to_val(x)
+
+            if self.active_handle == 'low':
+                self.low_val = min(val, self.high_val)
+            elif self.active_handle == 'high':
+                self.high_val = max(val, self.low_val)
+
+            self.update()
+            self.valuesChanged.emit(self.low_val, self.high_val)
+
+    def mouseReleaseEvent(self, event):
+        self.active_handle = None
+
+
+# ==============================================================================
+# DATA LOADING UTILITY
 # ==============================================================================
 def load_real_and_predicted_data(assembly_id=58, timestep=80):
-    """Loads 3D positions, actual NPMNCF (Vol A), and predicted NPMNCF (Vol B)."""
-    
     actual_dir = os.path.join("real_dataset", "actual_data")
     predicted_dir = os.path.join("real_dataset", "predicted_data")
 
@@ -49,7 +207,11 @@ def load_real_and_predicted_data(assembly_id=58, timestep=80):
     if not os.path.exists(pred_npmncf_path):
         pred_npmncf_path = resolve_path(predicted_dir, f"assembly_{assembly_id}_timestep_{timestep}_predicted_npmncf.csv")
 
-    # 1. Load 3D Coordinates (Actual Data)
+    for path in [pos_x_path, pos_y_path, pos_z_path, actual_npmncf_path, pred_npmncf_path]:
+        if not os.path.exists(path):
+            print(f"[Error] Missing required file for Timestep {timestep}: {path}")
+            return None, None, None, None, None, None, None
+
     df_x = pd.read_csv(pos_x_path, sep=r'\s+', skiprows=2, header=None, names=['ball_id', 'x'])
     df_y = pd.read_csv(pos_y_path, sep=r'\s+', skiprows=2, header=None, names=['ball_id', 'y'])
     df_z = pd.read_csv(pos_z_path, sep=r'\s+', skiprows=2, header=None, names=['ball_id', 'z'])
@@ -60,19 +222,23 @@ def load_real_and_predicted_data(assembly_id=58, timestep=80):
 
     df_coords = df_x.merge(df_y, on='ball_id').merge(df_z, on='ball_id')
 
-    # 2. Load Actual NPMNCF (Volume A) and normalize per paper standard
     df_actual = pd.read_csv(actual_npmncf_path, sep=r'\s+', skiprows=2, header=None, names=['ball_id', 'npmncf_raw'])
     df_actual['ball_id'] = pd.to_numeric(df_actual['ball_id'], errors='coerce')
     df_actual.dropna(subset=['ball_id'], inplace=True)
     df_actual['ball_id'] = df_actual['ball_id'].astype(int)
 
-    mean_force = df_actual['npmncf_raw'].mean()
-    df_actual['node_weight_actual'] = df_actual['npmncf_raw'] / mean_force if mean_force > 0 else df_actual['npmncf_raw']
+    raw_mean_force = df_actual['npmncf_raw'].mean()
+    df_actual['node_weight_actual'] = df_actual['npmncf_raw'] / raw_mean_force if raw_mean_force > 0 else df_actual['npmncf_raw']
 
-    # 3. Load GNN Predicted NPMNCF (Volume B)
+    normalized_mean_force = df_actual['node_weight_actual'].mean()
+    print("\n" + "=" * 60)
+    print(f"FORCE NORMALIZATION CHECK (Timestep {timestep} - Volume A):")
+    print(f"  Raw Force Mean (raw NPMNCF)        : {raw_mean_force:.6f}")
+    print(f"  Normalized Force Mean (Vol A Nodes): {normalized_mean_force:.6f}")
+    print("=" * 60 + "\n")
+
     df_pred = pd.read_csv(pred_npmncf_path)
 
-    # Merge Node Data
     df_nodes = df_pred.merge(df_actual[['ball_id', 'node_weight_actual']], on='ball_id', how='inner')
     df_nodes = df_nodes.merge(df_coords, on='ball_id', how='inner')
 
@@ -80,13 +246,11 @@ def load_real_and_predicted_data(assembly_id=58, timestep=80):
     num_nodes = len(ball_ids)
     id_to_idx = {bid: idx for idx, bid in enumerate(ball_ids)}
 
-    # Rescale coordinates for VTK 3D space
     coords = df_nodes[['x', 'y', 'z']].values.astype(np.float32) * 100.0
 
     node_weights_a = df_nodes['node_weight_actual'].values.astype(np.float32)
     node_weights_b = df_nodes['predicted_npmncf'].values.astype(np.float32)
 
-    # 4. Load Contact Connectivity (Fixed Original Contacts)
     end1_path = resolve_path(actual_dir, f"{assembly_id}_{timestep}_contact_end1.tab")
     end2_path = resolve_path(actual_dir, f"{assembly_id}_{timestep}_contact_end2.tab")
     pred_contact_path = resolve_path(predicted_dir, f"assembly_{assembly_id:02d}_timestep_{timestep:02d}_predicted_contact_force.csv")
@@ -150,12 +314,10 @@ class Fig3dMatrixDialog(QDialog):
 
         self.ax = self.fig.add_subplot(111)
 
-        # Vol A (Actual): Cyan -> Royal Blue -> Navy
         self.cmap_a = mcolors.LinearSegmentedColormap.from_list(
             'vol_a_cyan_blue',
             [(0.0, 0.85, 0.95), (0.1, 0.45, 0.95), (0.05, 0.15, 0.65), (0.02, 0.05, 0.35)]
         )
-        # Vol B (Predicted): Bright Gold/Orange -> Vermilion -> Dark Crimson
         self.cmap_b = mcolors.LinearSegmentedColormap.from_list(
             'vol_b_amber_crimson',
             [(1.0, 0.68, 0.0), (0.95, 0.30, 0.05), (0.75, 0.05, 0.10), (0.40, 0.0, 0.05)]
@@ -209,7 +371,6 @@ class Fig3dMatrixDialog(QDialog):
                     color_a = self.cmap_a(norm_a)
                     color_b = self.cmap_b(norm_b)
 
-                    # Left Bar (Volume A - Cyan/Blue)
                     if w_a > 0:
                         bar_a_x = x + pad_x
                         bar_a_y = y + pad_bottom
@@ -223,7 +384,6 @@ class Fig3dMatrixDialog(QDialog):
                                      color=txt_color_a, fontsize=font_sz, fontweight='bold',
                                      ha='center', va='center', rotation=90)
 
-                    # Right Bar (Volume B - Amber/Crimson)
                     if w_b > 0:
                         bar_b_x = x + pad_x + usable_w
                         bar_b_y = y + pad_bottom
@@ -256,10 +416,17 @@ class Fig3dMatrixDialog(QDialog):
 # MAIN DUAL-PANEL VIEWER
 # ==============================================================================
 class DualPanelForceChainBuilder(QMainWindow):
-    def __init__(self, adj_matrix, weights_a, weights_b, node_weights_a, node_weights_b, coords, ball_ids):
+    def __init__(self, initial_assembly=58, initial_timestep=80):
         super().__init__()
-        self.setWindowTitle("Parallel Force Chains (Vol A: Cyan-Navy | Vol B: Amber-Crimson)")
-        self.setGeometry(50, 50, 1500, 850)
+        self.current_assembly = initial_assembly
+        self.current_timestep = initial_timestep
+
+        self.setWindowTitle(f"Parallel Force Chains - (Assembly {self.current_assembly}, Timestep {self.current_timestep})")
+        self.setGeometry(50, 50, 1680, 850)
+
+        adj_matrix, weights_a, weights_b, node_weights_a, node_weights_b, coords, ball_ids = load_real_and_predicted_data(
+            self.current_assembly, self.current_timestep
+        )
 
         self.adj_matrix = adj_matrix
         self.weights_a = weights_a
@@ -270,15 +437,12 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.ball_ids = ball_ids
         self.num_nodes = len(coords)
 
-        # Global spatial bounds to stabilize near/far clipping planes
-        min_c = np.min(coords, axis=0)
-        max_c = np.max(coords, axis=0)
-        self.global_bounds = [min_c[0], max_c[0], min_c[1], max_c[1], min_c[2], max_c[2]]
+        self.compute_spatial_bounds()
 
         all_w = np.concatenate([weights_a[weights_a > 0], weights_b[weights_b > 0]])
-        self.global_min_w = float(np.min(all_w)) if len(all_w) > 0 else 0.1
+        self.global_min_w = 0.0
         self.global_max_w = float(np.max(all_w)) if len(all_w) > 0 else 1.0
-        self.active_min_w = self.global_min_w
+        self.active_min_w = 0.0
         self.active_max_w = self.global_max_w
 
         self.selected_node_indices = set()
@@ -298,58 +462,123 @@ class DualPanelForceChainBuilder(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
 
         control_layout = QHBoxLayout()
+        control_layout.setSpacing(8)
 
-        initial_threshold_val = np.percentile(self.raw_weights, 65) if len(self.raw_weights) > 0 else 0.0
-        self.slider_label = QLabel(f"Weight Threshold Value: {initial_threshold_val:.2f}")
-        self.slider_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
+        # 1. Timestep Text Entry
+        control_layout.addWidget(QLabel("<b>Timestep:</b>"))
+        self.timestep_input = QLineEdit(str(self.current_timestep))
+        self.timestep_input.setFixedWidth(42)
+        self.timestep_input.setAlignment(Qt.AlignCenter)
+        self.timestep_input.returnPressed.connect(self.handle_timestep_change)
+        control_layout.addWidget(self.timestep_input)
 
-        self.threshold_slider = QSlider(Qt.Horizontal)
-        self.threshold_slider.setMinimum(0)
-        self.threshold_slider.setMaximum(99)
-        self.threshold_slider.setValue(65)
-        self.threshold_slider.setTickPosition(QSlider.TicksBelow)
-        self.threshold_slider.setTickInterval(10)
-        self.threshold_slider.valueChanged.connect(self.on_slider_changed)
+        self.load_btn = QPushButton("Load")
+        self.load_btn.setFixedWidth(48)
+        self.load_btn.setStyleSheet("font-weight: bold; background-color: #005588; color: white;")
+        self.load_btn.clicked.connect(self.handle_timestep_change)
+        control_layout.addWidget(self.load_btn)
 
-        self.lock_camera_checkbox = QCheckBox("Lock Camera Movement")
+        control_layout.addSpacing(6)
+
+        # 2. Dual Range Slider & Manual Text Input Bounds [0.00, max_force]
+        control_layout.addWidget(QLabel("<b>Range:</b>"))
+        self.min_weight_input = QLineEdit("0.00")
+        self.min_weight_input.setFixedWidth(45)
+        self.min_weight_input.setAlignment(Qt.AlignCenter)
+        self.min_weight_input.setStyleSheet("""
+            QLineEdit {
+                font-weight: bold;
+                font-size: 9pt;
+                color: #00e6ff;
+                background-color: #222222;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 1px;
+            }
+        """)
+        self.min_weight_input.returnPressed.connect(self.on_manual_range_applied)
+        control_layout.addWidget(self.min_weight_input)
+
+        self.range_slider = RangeSlider(minimum=0, maximum=100, low=0, high=100)
+        self.range_slider.setMaxForceVal(self.global_max_w)
+        self.range_slider.valuesChanged.connect(self.on_range_changed)
+        control_layout.addWidget(self.range_slider)
+
+        self.max_weight_input = QLineEdit(f"{self.global_max_w:.2f}")
+        self.max_weight_input.setFixedWidth(45)
+        self.max_weight_input.setAlignment(Qt.AlignCenter)
+        self.max_weight_input.setStyleSheet("""
+            QLineEdit {
+                font-weight: bold;
+                font-size: 9pt;
+                color: #ff9800;
+                background-color: #222222;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 1px;
+            }
+        """)
+        self.max_weight_input.returnPressed.connect(self.on_manual_range_applied)
+        control_layout.addWidget(self.max_weight_input)
+
+        self.apply_range_btn = QPushButton("Set")
+        self.apply_range_btn.setFixedWidth(36)
+        self.apply_range_btn.setStyleSheet("font-weight: bold; background-color: #444444; color: white; font-size: 8pt;")
+        self.apply_range_btn.clicked.connect(self.on_manual_range_applied)
+        control_layout.addWidget(self.apply_range_btn)
+
+        self.update_range_validators()
+
+        control_layout.addSpacing(6)
+
+        # 3. Peak-Neighbor Chains Control
+        self.max_neighbor_toggle = QCheckBox("Max-Force Neighbor")
+        self.max_neighbor_toggle.setChecked(False)
+        self.max_neighbor_toggle.setStyleSheet("font-weight: bold; color: #ff55ff; font-size: 9pt;")
+        self.max_neighbor_toggle.toggled.connect(self.on_max_neighbor_toggled)
+        control_layout.addWidget(self.max_neighbor_toggle)
+
+        control_layout.addSpacing(6)
+
+        # 4. Camera Sync & ID Toggles
+        self.lock_camera_checkbox = QCheckBox("Lock Cam")
         self.lock_camera_checkbox.setChecked(True)
-        self.lock_camera_checkbox.setStyleSheet("font-weight: bold; color: #00e6ff; font-size: 10pt;")
+        self.lock_camera_checkbox.setStyleSheet("font-weight: bold; color: #00e6ff; font-size: 9pt;")
         self.lock_camera_checkbox.toggled.connect(self.on_camera_lock_toggled)
+        control_layout.addWidget(self.lock_camera_checkbox)
 
-        self.show_ids_checkbox = QCheckBox("Show Particle IDs (Right)")
+        self.show_ids_checkbox = QCheckBox("IDs (Right)")
         self.show_ids_checkbox.setChecked(True)
-        self.show_ids_checkbox.setStyleSheet("font-weight: bold; color: #ffcc00; font-size: 10pt;")
+        self.show_ids_checkbox.setStyleSheet("font-weight: bold; color: #ffcc00; font-size: 9pt;")
         self.show_ids_checkbox.toggled.connect(self.on_show_ids_toggled)
+        control_layout.addWidget(self.show_ids_checkbox)
 
+        control_layout.addSpacing(6)
+
+        # 5. Edge Filter Dropdown
         edge_filter_label = QLabel("Edge Filter:")
-        edge_filter_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
+        edge_filter_label.setStyleSheet("font-weight: bold; font-size: 9pt;")
+        control_layout.addWidget(edge_filter_label)
         
         self.edge_mode_combo = QComboBox()
         self.edge_mode_combo.addItems(["Default (Union)", "Only from A", "Only from B", "Both (Intersection)"])
-        self.edge_mode_combo.setStyleSheet("font-weight: bold; padding: 3px 8px; font-size: 10pt;")
+        self.edge_mode_combo.setStyleSheet("font-weight: bold; padding: 2px 4px; font-size: 9pt;")
         self.edge_mode_combo.currentIndexChanged.connect(self.on_edge_mode_changed)
-
-        self.matrix_btn = QPushButton("Open Matrix View")
-        self.matrix_btn.setStyleSheet("font-weight: bold; padding: 4px 12px; background-color: #005588; color: white; font-size: 10pt;")
-        self.matrix_btn.clicked.connect(self.open_matrix_window)
-
-        self.clear_btn = QPushButton("Clear Selection")
-        self.clear_btn.setStyleSheet("font-weight: bold; padding: 4px 12px; font-size: 10pt;")
-        self.clear_btn.clicked.connect(self.clear_selection)
-
-        control_layout.addWidget(self.slider_label)
-        control_layout.addWidget(self.threshold_slider)
-        control_layout.addSpacing(10)
-        control_layout.addWidget(self.lock_camera_checkbox)
-        control_layout.addSpacing(10)
-        control_layout.addWidget(self.show_ids_checkbox)
-        control_layout.addSpacing(10)
-        control_layout.addWidget(edge_filter_label)
         control_layout.addWidget(self.edge_mode_combo)
-        control_layout.addSpacing(10)
+
+        control_layout.addSpacing(6)
+
+        # 6. Matrix & Clear Action Buttons
+        self.matrix_btn = QPushButton("Matrix View")
+        self.matrix_btn.setStyleSheet("font-weight: bold; padding: 3px 8px; background-color: #005588; color: white; font-size: 9pt;")
+        self.matrix_btn.clicked.connect(self.open_matrix_window)
         control_layout.addWidget(self.matrix_btn)
-        control_layout.addSpacing(10)
+
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.setStyleSheet("font-weight: bold; padding: 3px 8px; font-size: 9pt;")
+        self.clear_btn.clicked.connect(self.clear_selection)
         control_layout.addWidget(self.clear_btn)
+
         control_layout.addStretch()
 
         main_layout.addLayout(control_layout)
@@ -361,13 +590,86 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.setup_right_panel()
 
         self.enable_camera_sync(True)
-        self.splitter.setSizes([700, 700])
+        self.splitter.setSizes([750, 750])
 
         self.matrix_dialog = Fig3dMatrixDialog(self)
 
-        self.update_left_visualization(threshold_percentile=65)
+        self.range_slider.setValues(0, 100)
         self.ren_left.ResetCamera()
         self.sync_clipping_ranges()
+
+    def _setup_orientation_axes_widget(self, interactor):
+        axes = vtk.vtkAxesActor()
+        axes.SetTotalLength(1.0, 1.0, 1.0)
+        axes.SetShaftTypeToCylinder()
+        axes.SetCylinderRadius(0.04)
+
+        axes.GetXAxisCaptionActor2D().GetCaptionTextProperty().SetColor(1.0, 0.25, 0.25)
+        axes.GetYAxisCaptionActor2D().GetCaptionTextProperty().SetColor(0.25, 1.0, 0.25)
+        axes.GetZAxisCaptionActor2D().GetCaptionTextProperty().SetColor(0.25, 0.55, 1.0)
+
+        for cap in [axes.GetXAxisCaptionActor2D(), axes.GetYAxisCaptionActor2D(), axes.GetZAxisCaptionActor2D()]:
+            cap.GetCaptionTextProperty().SetFontSize(10)
+            cap.GetCaptionTextProperty().BoldOn()
+            cap.GetCaptionTextProperty().ShadowOff()
+
+        orient_widget = vtk.vtkOrientationMarkerWidget()
+        orient_widget.SetOrientationMarker(axes)
+        orient_widget.SetInteractor(interactor)
+        orient_widget.SetViewport(0.0, 0.0, 0.22, 0.22)
+        orient_widget.SetEnabled(1)
+        orient_widget.InteractiveOff()
+
+        return orient_widget, axes
+
+    def update_range_validators(self):
+        val = QDoubleValidator(0.0, float(self.global_max_w), 2, self)
+        val.setNotation(QDoubleValidator.StandardNotation)
+        self.min_weight_input.setValidator(val)
+        self.max_weight_input.setValidator(val)
+
+    def compute_spatial_bounds(self):
+        min_c = np.min(self.coords, axis=0)
+        max_c = np.max(self.coords, axis=0)
+        self.global_bounds = [min_c[0], max_c[0], min_c[1], max_c[1], min_c[2], max_c[2]]
+
+    def handle_timestep_change(self):
+        text = self.timestep_input.text().strip()
+        try:
+            new_timestep = int(text)
+        except ValueError:
+            print(f"[Warning] Invalid timestep integer: '{text}'")
+            return
+
+        adj_matrix, weights_a, weights_b, node_weights_a, node_weights_b, coords, ball_ids = load_real_and_predicted_data(
+            self.current_assembly, new_timestep
+        )
+
+        if coords is None or len(weights_a) == 0:
+            print(f"[Warning] Failed to load data for Timestep {new_timestep}. Keeping previous state.")
+            return
+
+        self.current_timestep = new_timestep
+        self.adj_matrix = adj_matrix
+        self.weights_a = weights_a
+        self.weights_b = weights_b
+        self.node_weights_a = node_weights_a
+        self.node_weights_b = node_weights_b
+        self.coords = coords
+        self.ball_ids = ball_ids
+        self.num_nodes = len(coords)
+
+        all_w = np.concatenate([weights_a[weights_a > 0], weights_b[weights_b > 0]])
+        self.global_max_w = float(np.max(all_w)) if len(all_w) > 0 else 1.0
+        self.range_slider.setMaxForceVal(self.global_max_w)
+        self.update_range_validators()
+
+        self.compute_spatial_bounds()
+        self.build_graphs_from_arrays()
+        self.setWindowTitle(f"Parallel Force Chains - (Assembly {self.current_assembly}, Timestep {self.current_timestep})")
+
+        low, high = self.range_slider.getValues()
+        self.on_range_changed(low, high)
 
     def build_graphs_from_arrays(self):
         self.all_edges = []
@@ -385,7 +687,6 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.raw_weights = np.array(all_edge_weights, dtype=np.float32)
 
     def create_lut_a(self):
-        """Volume A: Rich Cyan -> Deep Navy Blue"""
         lut = vtk.vtkLookupTable()
         lut.SetNumberOfTableValues(256)
         for i in range(256):
@@ -398,7 +699,6 @@ class DualPanelForceChainBuilder(QMainWindow):
         return lut
 
     def create_lut_b(self):
-        """Volume B: Warm Amber/Orange -> Deep Crimson Red"""
         lut = vtk.vtkLookupTable()
         lut.SetNumberOfTableValues(256)
         for i in range(256):
@@ -485,6 +785,9 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.left_actor_chains_b.GetProperty().SetLineWidth(1.0)
         self.ren_left.AddActor(self.left_actor_chains_b)
 
+        # Floating 3D XYZ Orientation Axes Glyph (Left Viewport)
+        self.left_axes_widget, self.left_axes_actor = self._setup_orientation_axes_widget(self.vtk_left)
+
         self.splitter.addWidget(left_container)
 
     def setup_right_panel(self):
@@ -559,6 +862,9 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.right_actor_chains_b.GetProperty().SetLineWidth(1.0)
         self.ren_right.AddActor(self.right_actor_chains_b)
 
+        # Floating 3D XYZ Orientation Axes Glyph (Right Viewport)
+        self.right_axes_widget, self.right_axes_actor = self._setup_orientation_axes_widget(self.vtk_right)
+
         self.splitter.addWidget(right_container)
 
     def enable_camera_sync(self, enable=True):
@@ -570,7 +876,6 @@ class DualPanelForceChainBuilder(QMainWindow):
             self.ren_right.SetActiveCamera(independent_cam)
 
     def sync_clipping_ranges(self):
-        """Forces near/far clipping calculation against the full volume bounds."""
         self.ren_left.ResetCameraClippingRange(self.global_bounds)
         if self.lock_camera_checkbox.isChecked():
             self.ren_right.ResetCameraClippingRange(self.global_bounds)
@@ -586,8 +891,53 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.sync_clipping_ranges()
         self.vtk_right.GetRenderWindow().Render()
 
+    def on_max_neighbor_toggled(self, checked):
+        low, high = self.range_slider.getValues()
+        self.on_range_changed(low, high)
+
     def on_edge_mode_changed(self, index):
-        self.update_left_visualization(threshold_percentile=self.threshold_slider.value())
+        low, high = self.range_slider.getValues()
+        self.on_range_changed(low, high)
+
+    def on_range_changed(self, low_percentile, high_percentile):
+        min_w = (low_percentile / 100.0) * self.global_max_w
+        max_w = (high_percentile / 100.0) * self.global_max_w
+
+        self.min_weight_input.blockSignals(True)
+        self.max_weight_input.blockSignals(True)
+        self.min_weight_input.setText(f"{min_w:.2f}")
+        self.max_weight_input.setText(f"{max_w:.2f}")
+        self.min_weight_input.blockSignals(False)
+        self.max_weight_input.blockSignals(False)
+
+        self.apply_thresholds(min_w, max_w)
+
+    def on_manual_range_applied(self):
+        try:
+            min_w = float(self.min_weight_input.text().strip())
+        except ValueError:
+            min_w = 0.0
+
+        try:
+            max_w = float(self.max_weight_input.text().strip())
+        except ValueError:
+            max_w = float(self.global_max_w)
+
+        min_w = max(0.0, min(min_w, float(self.global_max_w)))
+        max_w = max(min_w, min(max_w, float(self.global_max_w)))
+
+        self.min_weight_input.setText(f"{min_w:.2f}")
+        self.max_weight_input.setText(f"{max_w:.2f}")
+
+        denom = self.global_max_w if self.global_max_w > 0 else 1.0
+        pct_low = int(round((min_w / denom) * 100.0))
+        pct_high = int(round((max_w / denom) * 100.0))
+
+        self.range_slider.blockSignals(True)
+        self.range_slider.setValues(pct_low, pct_high)
+        self.range_slider.blockSignals(False)
+
+        self.apply_thresholds(min_w, max_w)
 
     def on_left_interaction(self, obj, event):
         self.sync_clipping_ranges()
@@ -611,34 +961,13 @@ class DualPanelForceChainBuilder(QMainWindow):
         weights_matrix_a = {}
         weights_matrix_b = {}
 
-        min_w_threshold = np.percentile(self.raw_weights, self.threshold_slider.value()) if len(self.raw_weights) > 0 else 0.0
-        mode = self.edge_mode_combo.currentText()
+        for (u, v, wa) in getattr(self, 'active_edges_a', []):
+            weights_matrix_a[(u, v)] = wa
+            weights_matrix_a[(v, u)] = wa
 
-        for (u, v, wa, wb) in self.all_edges:
-            edge_a_active = (wa >= min_w_threshold)
-            edge_b_active = (wb >= min_w_threshold)
-
-            if mode == "Only from A":
-                if edge_a_active and not edge_b_active:
-                    weights_matrix_a[(u, v)] = wa
-                    weights_matrix_a[(v, u)] = wa
-            elif mode == "Only from B":
-                if edge_b_active and not edge_a_active:
-                    weights_matrix_b[(u, v)] = wb
-                    weights_matrix_b[(v, u)] = wb
-            elif mode == "Both (Intersection)":
-                if edge_a_active and edge_b_active:
-                    weights_matrix_a[(u, v)] = wa
-                    weights_matrix_a[(v, u)] = wa
-                    weights_matrix_b[(u, v)] = wb
-                    weights_matrix_b[(v, u)] = wb
-            else:  
-                if edge_a_active:
-                    weights_matrix_a[(u, v)] = wa
-                    weights_matrix_a[(v, u)] = wa
-                if edge_b_active:
-                    weights_matrix_b[(u, v)] = wb
-                    weights_matrix_b[(v, u)] = wb
+        for (u, v, wb) in getattr(self, 'active_edges_b', []):
+            weights_matrix_b[(u, v)] = wb
+            weights_matrix_b[(v, u)] = wb
 
         for n in selected_list:
             weights_matrix_a[(n, n)] = self.node_weights_a[n]
@@ -647,47 +976,92 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.matrix_dialog.draw_matrix(selected_list, weights_matrix_a, weights_matrix_b, 
                                         self.active_min_w, self.active_max_w)
 
-    def update_left_visualization(self, threshold_percentile):
-        min_weight_threshold = np.percentile(self.raw_weights, threshold_percentile) if len(self.raw_weights) > 0 else 0.0
+    def _filter_highest_force_neighbor_edges(self, edge_list):
+        if not edge_list:
+            return []
 
-        self.slider_label.setText(f"Weight Threshold Value: {min_weight_threshold:.2f}")
+        best_edge_per_node = {}
 
-        self.active_edges_a = []
-        self.active_edges_b = []
-        nodes_with_edges = set()
+        for u, v, w in edge_list:
+            if u not in best_edge_per_node or w > best_edge_per_node[u][2]:
+                best_edge_per_node[u] = (u, v, w)
+
+            if v not in best_edge_per_node or w > best_edge_per_node[v][2]:
+                best_edge_per_node[v] = (u, v, w)
+
+        unique_edges = {}
+        for edge in best_edge_per_node.values():
+            u, v, w = edge
+            pair = (min(u, v), max(u, v))
+            if pair not in unique_edges or w > unique_edges[pair][2]:
+                unique_edges[pair] = (pair[0], pair[1], w)
+
+        return list(unique_edges.values())
+
+    def apply_thresholds(self, min_weight_threshold, max_weight_threshold):
+        raw_edges_a = []
+        raw_edges_b = []
         mode = self.edge_mode_combo.currentText()
 
+        # 1. Edge-Level Thresholding per Dropdown Mode
         for (u, v, wa, wb) in self.all_edges:
-            edge_a_active = (wa >= min_weight_threshold)
-            edge_b_active = (wb >= min_weight_threshold)
+            edge_a_active = (min_weight_threshold <= wa <= max_weight_threshold)
+            edge_b_active = (min_weight_threshold <= wb <= max_weight_threshold)
 
             if mode == "Only from A":
-                if edge_a_active and not edge_b_active:
-                    self.active_edges_a.append((u, v, wa))
-                    nodes_with_edges.add(u)
-                    nodes_with_edges.add(v)
+                if edge_a_active:
+                    raw_edges_a.append((u, v, wa))
             elif mode == "Only from B":
-                if edge_b_active and not edge_a_active:
-                    self.active_edges_b.append((u, v, wb))
-                    nodes_with_edges.add(u)
-                    nodes_with_edges.add(v)
+                if edge_b_active:
+                    raw_edges_b.append((u, v, wb))
             elif mode == "Both (Intersection)":
                 if edge_a_active and edge_b_active:
-                    self.active_edges_a.append((u, v, wa))
-                    self.active_edges_b.append((u, v, wb))
-                    nodes_with_edges.add(u)
-                    nodes_with_edges.add(v)
-            else:  
+                    raw_edges_a.append((u, v, wa))
+                    raw_edges_b.append((u, v, wb))
+            else:  # Default (Union)
                 if edge_a_active:
-                    self.active_edges_a.append((u, v, wa))
-                    nodes_with_edges.add(u)
-                    nodes_with_edges.add(v)
+                    raw_edges_a.append((u, v, wa))
                 if edge_b_active:
-                    self.active_edges_b.append((u, v, wb))
-                    nodes_with_edges.add(u)
-                    nodes_with_edges.add(v)
+                    raw_edges_b.append((u, v, wb))
 
-        self.active_visible_nodes_left = sorted(list(nodes_with_edges))
+        # 2. Filter Highest Force Neighbor Chains if toggled
+        if self.max_neighbor_toggle.isChecked():
+            self.active_edges_a = self._filter_highest_force_neighbor_edges(raw_edges_a)
+            self.active_edges_b = self._filter_highest_force_neighbor_edges(raw_edges_b)
+        else:
+            self.active_edges_a = raw_edges_a
+            self.active_edges_b = raw_edges_b
+
+        # 3. Node-Level Retention
+        nodes_with_edges = set()
+        for (u, v, _) in self.active_edges_a:
+            nodes_with_edges.add(u)
+            nodes_with_edges.add(v)
+        for (u, v, _) in self.active_edges_b:
+            nodes_with_edges.add(u)
+            nodes_with_edges.add(v)
+
+        if self.max_neighbor_toggle.isChecked():
+            visible_nodes = set(nodes_with_edges)
+        else:
+            visible_nodes = set(nodes_with_edges)
+            for i in range(self.num_nodes):
+                if mode == "Only from A":
+                    if min_weight_threshold <= self.node_weights_a[i] <= max_weight_threshold:
+                        visible_nodes.add(i)
+                elif mode == "Only from B":
+                    if min_weight_threshold <= self.node_weights_b[i] <= max_weight_threshold:
+                        visible_nodes.add(i)
+                elif mode == "Both (Intersection)":
+                    if (min_weight_threshold <= self.node_weights_a[i] <= max_weight_threshold) and \
+                       (min_weight_threshold <= self.node_weights_b[i] <= max_weight_threshold):
+                        visible_nodes.add(i)
+                else:  # Default (Union)
+                    if (min_weight_threshold <= self.node_weights_a[i] <= max_weight_threshold) or \
+                       (min_weight_threshold <= self.node_weights_b[i] <= max_weight_threshold):
+                        visible_nodes.add(i)
+
+        self.active_visible_nodes_left = sorted(list(visible_nodes))
 
         if len(self.active_visible_nodes_left) == 0:
             self.left_actor_nodes.SetVisibility(False)
@@ -708,6 +1082,7 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         delta_offset = 0.008
 
+        # --- Volume A Parallel Lines ---
         lines_a = vtk.vtkCellArray()
         line_pts_a = vtk.vtkPoints()
         edge_weight_list_a = []
@@ -738,6 +1113,7 @@ class DualPanelForceChainBuilder(QMainWindow):
             edge_weight_list_a.append(wa)
             pt_idx_a += 2
 
+        # --- Volume B Parallel Lines ---
         lines_b = vtk.vtkCellArray()
         line_pts_b = vtk.vtkPoints()
         edge_weight_list_b = []
@@ -767,6 +1143,12 @@ class DualPanelForceChainBuilder(QMainWindow):
 
             edge_weight_list_b.append(wb)
             pt_idx_b += 2
+
+        line_width = 2.2 if self.max_neighbor_toggle.isChecked() else 1.0
+        self.left_actor_chains_a.GetProperty().SetLineWidth(line_width)
+        self.left_actor_chains_b.GetProperty().SetLineWidth(line_width)
+        self.right_actor_chains_a.GetProperty().SetLineWidth(line_width)
+        self.right_actor_chains_b.GetProperty().SetLineWidth(line_width)
 
         combined_active_weights = edge_weight_list_a + edge_weight_list_b
         if len(combined_active_weights) > 0:
@@ -885,6 +1267,7 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         delta_offset = 0.008
 
+        # --- Right Subgraph Volume A Parallel Edges ---
         lines_a = vtk.vtkCellArray()
         line_pts_a = vtk.vtkPoints()
         edge_weight_list_a = []
@@ -916,6 +1299,7 @@ class DualPanelForceChainBuilder(QMainWindow):
                 edge_weight_list_a.append(wa)
                 pt_idx_a += 2
 
+        # --- Right Subgraph Volume B Parallel Edges ---
         lines_b = vtk.vtkCellArray()
         line_pts_b = vtk.vtkPoints()
         edge_weight_list_b = []
@@ -966,6 +1350,7 @@ class DualPanelForceChainBuilder(QMainWindow):
             self.right_actor_chains_b.SetVisibility(False)
 
         self.update_right_particle_id_labels()
+
         self.sync_clipping_ranges()
         self.vtk_right.GetRenderWindow().Render()
 
@@ -1029,9 +1414,6 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         return -1
 
-    def on_slider_changed(self, value):
-        self.update_left_visualization(threshold_percentile=value)
-
     def on_left_mouse_move(self, obj, event):
         picked_id = self.get_picked_particle_id_left()
         self.highlight_particle_center(picked_id)
@@ -1075,15 +1457,10 @@ def main():
     app = QApplication(sys.argv)
     
     base_font = app.font()
-    base_font.setPointSize(10)
+    base_font.setPointSize(9)
     app.setFont(base_font)
 
-    adj_matrix, weights_a, weights_b, node_weights_a, node_weights_b, coords, ball_ids = load_real_and_predicted_data(
-        assembly_id=58, 
-        timestep=80
-    )
-
-    viewer = DualPanelForceChainBuilder(adj_matrix, weights_a, weights_b, node_weights_a, node_weights_b, coords, ball_ids)
+    viewer = DualPanelForceChainBuilder(initial_assembly=58, initial_timestep=80)
     viewer.show()
     sys.exit(app.exec())
 

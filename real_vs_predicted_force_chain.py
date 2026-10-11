@@ -8,7 +8,7 @@ from vtkmodules.util.numpy_support import numpy_to_vtk
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QLabel, QPushButton, QCheckBox, QComboBox, QSplitter, QFrame, QDialog, QLineEdit
+    QLabel, QPushButton, QCheckBox, QComboBox, QSplitter, QFrame, QDialog, QLineEdit, QSlider
 )
 from PySide6.QtCore import Qt, Signal, QRectF
 from PySide6.QtGui import QPainter, QColor, QBrush, QPen, QDoubleValidator, QIntValidator, QFont
@@ -42,7 +42,7 @@ class RangeSlider(QWidget):
         self.active_handle = None
 
         self.setMinimumHeight(44)
-        self.setFixedWidth(135)
+        self.setFixedWidth(120)
 
     def setMaxForceVal(self, max_val):
         self.max_force_val = max(1e-5, float(max_val))
@@ -84,12 +84,10 @@ class RangeSlider(QWidget):
 
         track_rect = QRectF(self.handle_radius, cy - 2.5, w - 2 * self.handle_radius, 5)
 
-        # 1. Background Track
         painter.setBrush(QBrush(QColor("#333333")))
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(track_rect, 2.5, 2.5)
 
-        # 2. Active Span Between Low and High
         low_x = self._val_to_pos(self.low_val)
         high_x = self._val_to_pos(self.high_val)
 
@@ -97,7 +95,6 @@ class RangeSlider(QWidget):
         painter.setBrush(QBrush(QColor("#00bcd4")))
         painter.drawRoundedRect(span_rect, 2.5, 2.5)
 
-        # 3. Ruler Scale Ticks Below Track
         major_pen = QPen(QColor("#999999"), 1.0)
         minor_pen = QPen(QColor("#555555"), 0.8)
 
@@ -114,7 +111,6 @@ class RangeSlider(QWidget):
                 painter.setPen(minor_pen)
                 painter.drawLine(int(tx), int(tick_top), int(tx), int(tick_top + 2.0))
 
-        # 4. Numeric Value Labels
         font = QFont()
         font.setPointSize(7)
         font.setBold(True)
@@ -139,7 +135,6 @@ class RangeSlider(QWidget):
         rect_100 = QRectF(pos_100 - 25, label_y, 40, label_h)
         painter.drawText(rect_100, Qt.AlignHCenter | Qt.AlignTop, f"{self.max_force_val:.2f}")
 
-        # 5. Interactive Handles
         for x, color, border in [(low_x, QColor("#00e6ff"), QColor("#ffffff")), 
                                  (high_x, QColor("#ff9800"), QColor("#ffffff"))]:
             painter.setBrush(QBrush(color))
@@ -199,7 +194,7 @@ class ChainLengthSlider(QWidget):
         self.is_dragging = False
 
         self.setMinimumHeight(44)
-        self.setFixedWidth(105)
+        self.setFixedWidth(90)
 
     def setRange(self, min_val, max_val):
         self.min_val = min_val
@@ -250,18 +245,15 @@ class ChainLengthSlider(QWidget):
 
         track_rect = QRectF(self.handle_radius, cy - 2.5, w - 2 * self.handle_radius, 5)
 
-        # 1. Background Track
         painter.setBrush(QBrush(QColor("#333333")))
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(track_rect, 2.5, 2.5)
 
-        # 2. Active Span From Min to Current
         h_x = self._val_to_pos(self.curr_val)
         span_rect = QRectF(self.handle_radius, cy - 2.5, max(0.0, h_x - self.handle_radius), 5)
         painter.setBrush(QBrush(QColor("#00ffaa") if self.isEnabled() else QColor("#555555")))
         painter.drawRoundedRect(span_rect, 2.5, 2.5)
 
-        # 3. Ruler Ticks Below Track
         major_pen = QPen(QColor("#999999") if self.isEnabled() else QColor("#444444"), 1.0)
         minor_pen = QPen(QColor("#555555") if self.isEnabled() else QColor("#333333"), 0.8)
 
@@ -282,7 +274,6 @@ class ChainLengthSlider(QWidget):
         painter.drawLine(int(pos_mid), int(tick_top), int(pos_mid), int(tick_top + 4.5))
         painter.drawLine(int(pos_max), int(tick_top), int(pos_max), int(tick_top + 5.5))
 
-        # 4. Text Labels Below Min (1), Mid, Max
         font = QFont()
         font.setPointSize(7)
         font.setBold(True)
@@ -303,7 +294,6 @@ class ChainLengthSlider(QWidget):
             rect_max = QRectF(pos_max - 15, label_y, 30, label_h)
             painter.drawText(rect_max, Qt.AlignHCenter | Qt.AlignTop, str(self.max_val))
 
-        # 5. Handle
         handle_color = QColor("#00ffaa") if self.isEnabled() else QColor("#777777")
         painter.setBrush(QBrush(handle_color))
         painter.setPen(QPen(QColor("#ffffff"), 1.2))
@@ -568,7 +558,7 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.current_timestep = initial_timestep
 
         self.setWindowTitle(f"Parallel Force Chains - (Assembly {self.current_assembly}, Timestep {self.current_timestep})")
-        self.setGeometry(50, 50, 1680, 850)
+        self.setGeometry(30, 40, 1820, 880)
 
         adj_matrix, weights_a, weights_b, node_weights_a, node_weights_b, coords, ball_ids = load_real_and_predicted_data(
             self.current_assembly, self.current_timestep
@@ -582,6 +572,7 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.coords = coords
         self.ball_ids = ball_ids
         self.num_nodes = len(coords)
+        self.id_to_idx = {bid: idx for idx, bid in enumerate(ball_ids)}
 
         self.compute_spatial_bounds()
 
@@ -592,12 +583,15 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.active_max_w = self.global_max_w
 
         self.selected_node_indices = set()
+        self.selected_nodes_a = set()
+        self.selected_nodes_b = set()
+
         self.traced_chain_edges_a = set()
         self.traced_chain_edges_b = set()
 
-        # Complete precomputed trajectories for independent branch extension
-        self.full_chain_path_a = []
-        self.full_chain_path_b = []
+        # Multi-seed path storage: list of paths for each root seed
+        self.full_chain_paths_a = []
+        self.full_chain_paths_b = []
         self.active_chain_root_node = -1
         self.hovered_node_idx = -1
         self.active_visible_nodes_left = []
@@ -615,28 +609,28 @@ class DualPanelForceChainBuilder(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
 
         control_layout = QHBoxLayout()
-        control_layout.setSpacing(6)
+        control_layout.setSpacing(5)
 
         # 1. Timestep Text Entry
         control_layout.addWidget(QLabel("<b>Timestep:</b>"))
         self.timestep_input = QLineEdit(str(self.current_timestep))
-        self.timestep_input.setFixedWidth(40)
+        self.timestep_input.setFixedWidth(36)
         self.timestep_input.setAlignment(Qt.AlignCenter)
         self.timestep_input.returnPressed.connect(self.handle_timestep_change)
         control_layout.addWidget(self.timestep_input)
 
         self.load_btn = QPushButton("Load")
-        self.load_btn.setFixedWidth(46)
+        self.load_btn.setFixedWidth(42)
         self.load_btn.setStyleSheet("font-weight: bold; background-color: #005588; color: white;")
         self.load_btn.clicked.connect(self.handle_timestep_change)
         control_layout.addWidget(self.load_btn)
 
-        control_layout.addSpacing(4)
+        control_layout.addSpacing(3)
 
         # 2. Dual Range Slider & Manual Text Input Bounds [0.00, max_force]
         control_layout.addWidget(QLabel("<b>Range:</b>"))
         self.min_weight_input = QLineEdit("0.00")
-        self.min_weight_input.setFixedWidth(42)
+        self.min_weight_input.setFixedWidth(38)
         self.min_weight_input.setAlignment(Qt.AlignCenter)
         self.min_weight_input.setStyleSheet("""
             QLineEdit {
@@ -658,7 +652,7 @@ class DualPanelForceChainBuilder(QMainWindow):
         control_layout.addWidget(self.range_slider)
 
         self.max_weight_input = QLineEdit(f"{self.global_max_w:.2f}")
-        self.max_weight_input.setFixedWidth(42)
+        self.max_weight_input.setFixedWidth(38)
         self.max_weight_input.setAlignment(Qt.AlignCenter)
         self.max_weight_input.setStyleSheet("""
             QLineEdit {
@@ -675,14 +669,14 @@ class DualPanelForceChainBuilder(QMainWindow):
         control_layout.addWidget(self.max_weight_input)
 
         self.apply_range_btn = QPushButton("Set")
-        self.apply_range_btn.setFixedWidth(34)
+        self.apply_range_btn.setFixedWidth(30)
         self.apply_range_btn.setStyleSheet("font-weight: bold; background-color: #444444; color: white; font-size: 8pt;")
         self.apply_range_btn.clicked.connect(self.on_manual_range_applied)
         control_layout.addWidget(self.apply_range_btn)
 
         self.update_range_validators()
 
-        control_layout.addSpacing(4)
+        control_layout.addSpacing(3)
 
         # 3. Peak-Neighbor Chains Control
         self.max_neighbor_toggle = QCheckBox("Max-Force")
@@ -691,31 +685,91 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.max_neighbor_toggle.toggled.connect(self.on_max_neighbor_toggled)
         control_layout.addWidget(self.max_neighbor_toggle)
 
-        control_layout.addSpacing(4)
+        control_layout.addSpacing(3)
 
-        # 4. Global Max-Magnitude Edge Toggle (Mutually Exclusive)
-        self.global_max_edge_toggle = QCheckBox("Max Edge (Right)")
+        # 4. Global Max-Magnitude Edge Toggle
+        self.global_max_edge_toggle = QCheckBox("Max Edge")
         self.global_max_edge_toggle.setChecked(False)
         self.global_max_edge_toggle.setStyleSheet("font-weight: bold; color: #ff9933; font-size: 8.5pt;")
         self.global_max_edge_toggle.toggled.connect(self.on_global_max_edge_toggled)
         control_layout.addWidget(self.global_max_edge_toggle)
 
-        control_layout.addSpacing(4)
+        control_layout.addSpacing(3)
 
-        # 5. Chain Origin Trace Toggle & Custom Tick-Enabled Chain Length Slider + Input
-        self.trace_chain_toggle = QCheckBox("Trace Chain")
+        # 5. Top Slab Seeds Controls (Thickness: 1-10%, K: 1-10)
+        self.top_slab_toggle = QCheckBox("Top Slab Seeds")
+        self.top_slab_toggle.setChecked(False)
+        self.top_slab_toggle.setStyleSheet("font-weight: bold; color: #ffeb3b; font-size: 8.5pt;")
+        self.top_slab_toggle.toggled.connect(self.on_top_slab_toggled)
+        control_layout.addWidget(self.top_slab_toggle)
+
+        self.slab_thick_label = QLabel("Thick: 5%")
+        self.slab_thick_label.setStyleSheet("font-size: 8pt; color: #ffeb3b;")
+        control_layout.addWidget(self.slab_thick_label)
+
+        self.slab_thick_slider = QSlider(Qt.Horizontal)
+        self.slab_thick_slider.setRange(1, 10)
+        self.slab_thick_slider.setValue(5)
+        self.slab_thick_slider.setFixedWidth(50)
+        self.slab_thick_slider.setEnabled(False)
+        self.slab_thick_slider.valueChanged.connect(self.on_slab_param_changed)
+        control_layout.addWidget(self.slab_thick_slider)
+
+        self.slab_k_label = QLabel("K: 5")
+        self.slab_k_label.setStyleSheet("font-size: 8pt; color: #ffeb3b;")
+        control_layout.addWidget(self.slab_k_label)
+
+        self.slab_k_slider = QSlider(Qt.Horizontal)
+        self.slab_k_slider.setRange(1, 10)
+        self.slab_k_slider.setValue(5)
+        self.slab_k_slider.setFixedWidth(50)
+        self.slab_k_slider.setEnabled(False)
+        self.slab_k_slider.valueChanged.connect(self.on_slab_param_changed)
+        control_layout.addWidget(self.slab_k_slider)
+
+        control_layout.addSpacing(3)
+
+        # 6. Single Chain Origin Trace Toggle, Seed ID Entry, and Chain Length Controls
+        self.trace_chain_toggle = QCheckBox("Trace Click")
         self.trace_chain_toggle.setChecked(False)
         self.trace_chain_toggle.setStyleSheet("font-weight: bold; color: #00ffaa; font-size: 8.5pt;")
         self.trace_chain_toggle.toggled.connect(self.on_trace_chain_toggled)
         control_layout.addWidget(self.trace_chain_toggle)
 
+        self.seed_id_input = QLineEdit()
+        self.seed_id_input.setFixedWidth(38)
+        self.seed_id_input.setAlignment(Qt.AlignCenter)
+        self.seed_id_input.setPlaceholderText("ID")
+        self.seed_id_input.setEnabled(False)
+        self.seed_id_input.setStyleSheet("""
+            QLineEdit {
+                font-weight: bold;
+                font-size: 8.5pt;
+                color: #ffffff;
+                background-color: #222222;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 1px;
+            }
+        """)
+        self.seed_id_input.returnPressed.connect(self.on_seed_id_entered)
+        control_layout.addWidget(self.seed_id_input)
+
+        self.seed_apply_btn = QPushButton("Go")
+        self.seed_apply_btn.setFixedWidth(26)
+        self.seed_apply_btn.setEnabled(False)
+        self.seed_apply_btn.setStyleSheet("font-weight: bold; background-color: #337755; color: white; font-size: 8pt;")
+        self.seed_apply_btn.clicked.connect(self.on_seed_id_entered)
+        control_layout.addWidget(self.seed_apply_btn)
+
+        control_layout.addWidget(QLabel("<b>Len:</b>"))
         self.chain_length_slider = ChainLengthSlider(minimum=1, maximum=1, value=1)
         self.chain_length_slider.setEnabled(False)
         self.chain_length_slider.valueChanged.connect(self.on_chain_length_slider_changed)
         control_layout.addWidget(self.chain_length_slider)
 
         self.chain_length_input = QLineEdit("1")
-        self.chain_length_input.setFixedWidth(32)
+        self.chain_length_input.setFixedWidth(28)
         self.chain_length_input.setAlignment(Qt.AlignCenter)
         self.chain_length_input.setEnabled(False)
         self.chain_length_input.setStyleSheet("""
@@ -734,9 +788,9 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.chain_length_input.returnPressed.connect(self.on_chain_length_text_applied)
         control_layout.addWidget(self.chain_length_input)
 
-        control_layout.addSpacing(4)
+        control_layout.addSpacing(3)
 
-        # 6. Camera Sync & ID Toggles
+        # 7. Camera Sync & ID Toggles
         self.lock_camera_checkbox = QCheckBox("Lock Cam")
         self.lock_camera_checkbox.setChecked(True)
         self.lock_camera_checkbox.setStyleSheet("font-weight: bold; color: #00e6ff; font-size: 8.5pt;")
@@ -749,18 +803,18 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.show_ids_checkbox.toggled.connect(self.on_show_ids_toggled)
         control_layout.addWidget(self.show_ids_checkbox)
 
-        control_layout.addSpacing(4)
+        control_layout.addSpacing(3)
 
-        # 7. Edge Filter Dropdown
+        # 8. Edge Filter Dropdown
         self.edge_mode_combo = QComboBox()
         self.edge_mode_combo.addItems(["Default (Union)", "Only from A", "Only from B", "Both (Intersection)"])
         self.edge_mode_combo.setStyleSheet("font-weight: bold; padding: 2px 4px; font-size: 8.5pt;")
         self.edge_mode_combo.currentIndexChanged.connect(self.on_edge_mode_changed)
         control_layout.addWidget(self.edge_mode_combo)
 
-        control_layout.addSpacing(4)
+        control_layout.addSpacing(3)
 
-        # 8. Matrix & Clear Action Buttons
+        # 9. Matrix & Clear Action Buttons
         self.matrix_btn = QPushButton("Matrix")
         self.matrix_btn.setStyleSheet("font-weight: bold; padding: 3px 6px; background-color: #005588; color: white; font-size: 8.5pt;")
         self.matrix_btn.clicked.connect(self.open_matrix_window)
@@ -825,6 +879,8 @@ class DualPanelForceChainBuilder(QMainWindow):
         max_c = np.max(self.coords, axis=0)
         self.global_bounds = [min_c[0], max_c[0], min_c[1], max_c[1], min_c[2], max_c[2]]
         self.volume_span = float(np.linalg.norm(max_c - min_c)) or 1.0
+        self.z_min = float(min_c[2])
+        self.z_max = float(max_c[2])
 
     def reset_chain_length_to_one(self):
         self.chain_length_slider.blockSignals(True)
@@ -833,6 +889,128 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.chain_length_input.setText("1")
         self.chain_length_slider.blockSignals(False)
         self.chain_length_input.blockSignals(False)
+
+    def on_top_slab_toggled(self, checked):
+        self.slab_thick_slider.setEnabled(checked)
+        self.slab_k_slider.setEnabled(checked)
+        self.chain_length_slider.setEnabled(checked)
+        self.chain_length_input.setEnabled(checked)
+
+        if checked:
+            # Uncheck single click & max edge modes
+            self.trace_chain_toggle.blockSignals(True)
+            self.trace_chain_toggle.setChecked(False)
+            self.trace_chain_toggle.blockSignals(False)
+
+            self.global_max_edge_toggle.blockSignals(True)
+            self.global_max_edge_toggle.setChecked(False)
+            self.global_max_edge_toggle.blockSignals(False)
+
+            self.seed_id_input.setEnabled(False)
+            self.seed_apply_btn.setEnabled(False)
+            self.seed_id_input.clear()
+
+            self.reset_chain_length_to_one()
+            self._recalculate_top_slab_chains()
+        else:
+            self.full_chain_paths_a.clear()
+            self.full_chain_paths_b.clear()
+            self.selected_nodes_a.clear()
+            self.selected_nodes_b.clear()
+            self.traced_chain_edges_a.clear()
+            self.traced_chain_edges_b.clear()
+            self.reset_chain_length_to_one()
+            self.update_particle_colors()
+            self.update_right_subgraph()
+            self.sync_clipping_ranges()
+            self.vtk_left.GetRenderWindow().Render()
+
+    def on_slab_param_changed(self):
+        pct = self.slab_thick_slider.value()
+        k = self.slab_k_slider.value()
+        self.slab_thick_label.setText(f"Thick: {pct}%")
+        self.slab_k_label.setText(f"K: {k}")
+
+        if self.top_slab_toggle.isChecked():
+            self.reset_chain_length_to_one()
+            self._recalculate_top_slab_chains()
+
+    def _recalculate_top_slab_chains(self):
+        """
+        Identifies top-K weighted particles within the upper XY slab (1-10% of Z)
+        and independently traces full paths for Volume A and Volume B.
+        """
+        pct = self.slab_thick_slider.value()
+        k = self.slab_k_slider.value()
+        z_thickness = (pct / 100.0) * (self.z_max - self.z_min)
+        z_threshold = self.z_max - z_thickness
+
+        # Find visible candidate particles whose Z coordinate lies within the top slab
+        slab_candidates = [
+            idx for idx in self.active_visible_nodes_left 
+            if self.coords[idx, 2] >= z_threshold
+        ]
+
+        if not slab_candidates:
+            self.full_chain_paths_a.clear()
+            self.full_chain_paths_b.clear()
+            self.selected_nodes_a.clear()
+            self.selected_nodes_b.clear()
+            self.traced_chain_edges_a.clear()
+            self.traced_chain_edges_b.clear()
+            self.update_particle_colors()
+            self.update_right_subgraph()
+            self.sync_clipping_ranges()
+            self.vtk_left.GetRenderWindow().Render()
+            return
+
+        # Rank candidates by composite force weight (max across Vol A & B)
+        slab_candidates.sort(key=lambda idx: max(self.node_weights_a[idx], self.node_weights_b[idx]), reverse=True)
+        top_k_seeds = slab_candidates[:k]
+
+        self.full_chain_paths_a = []
+        self.full_chain_paths_b = []
+
+        max_possible_len = 1
+        for seed in top_k_seeds:
+            path_a = self._trace_full_single_volume_path(seed, self.active_edges_a, self.node_weights_a)
+            path_b = self._trace_full_single_volume_path(seed, self.active_edges_b, self.node_weights_b)
+            self.full_chain_paths_a.append(path_a)
+            self.full_chain_paths_b.append(path_b)
+            max_possible_len = max(max_possible_len, len(path_a), len(path_b))
+
+        self.chain_length_slider.blockSignals(True)
+        self.chain_length_input.blockSignals(True)
+        self.chain_length_slider.setRange(1, max_possible_len)
+        self.chain_length_validator.setRange(1, max_possible_len)
+        self.chain_length_slider.setValue(1)
+        self.chain_length_input.setText("1")
+        self.chain_length_slider.blockSignals(False)
+        self.chain_length_input.blockSignals(False)
+
+        self._apply_chain_length(1)
+
+    def on_seed_id_entered(self):
+        text = self.seed_id_input.text().strip()
+        if not text:
+            return
+        try:
+            bid = int(text)
+        except ValueError:
+            print(f"[Warning] Invalid particle ID: '{text}'")
+            return
+
+        if bid not in self.id_to_idx:
+            print(f"[Warning] Ball ID {bid} does not exist in dataset.")
+            return
+
+        node_idx = self.id_to_idx[bid]
+
+        if not self.trace_chain_toggle.isChecked():
+            self.trace_chain_toggle.setChecked(True)
+
+        self.reset_chain_length_to_one()
+        self._recalculate_full_chains_and_update(node_idx)
 
     def handle_timestep_change(self):
         text = self.timestep_input.text().strip()
@@ -859,6 +1037,7 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.coords = coords
         self.ball_ids = ball_ids
         self.num_nodes = len(coords)
+        self.id_to_idx = {bid: idx for idx, bid in enumerate(ball_ids)}
 
         all_w = np.concatenate([weights_a[weights_a > 0], weights_b[weights_b > 0]])
         self.global_max_w = float(np.max(all_w)) if len(all_w) > 0 else 1.0
@@ -870,7 +1049,6 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.setWindowTitle(f"Parallel Force Chains - (Assembly {self.current_assembly}, Timestep {self.current_timestep})")
 
         self.reset_chain_length_to_one()
-
         low, high = self.range_slider.getValues()
         self.on_range_changed(low, high)
 
@@ -988,7 +1166,6 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.left_actor_chains_b.GetProperty().SetLineWidth(1.0)
         self.ren_left.AddActor(self.left_actor_chains_b)
 
-        # Orientation Axes Marker (Lower-Left Viewport)
         self.left_axes_widget, self.left_axes_actor = self._setup_orientation_axes_widget(self.vtk_left)
 
         self.splitter.addWidget(left_container)
@@ -1065,7 +1242,6 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.right_actor_chains_b.GetProperty().SetLineWidth(1.0)
         self.ren_right.AddActor(self.right_actor_chains_b)
 
-        # Orientation Axes Marker (Right Viewport)
         self.right_axes_widget, self.right_axes_actor = self._setup_orientation_axes_widget(self.vtk_right)
 
         self.splitter.addWidget(right_container)
@@ -1113,32 +1289,56 @@ class DualPanelForceChainBuilder(QMainWindow):
             self.trace_chain_toggle.setChecked(False)
             self.trace_chain_toggle.blockSignals(False)
 
+            self.top_slab_toggle.blockSignals(True)
+            self.top_slab_toggle.setChecked(False)
+            self.top_slab_toggle.blockSignals(False)
+            self.slab_thick_slider.setEnabled(False)
+            self.slab_k_slider.setEnabled(False)
+
             self.chain_length_slider.setEnabled(False)
             self.chain_length_input.setEnabled(False)
+            self.seed_id_input.setEnabled(False)
+            self.seed_apply_btn.setEnabled(False)
             self.active_chain_root_node = -1
+            self.selected_nodes_a.clear()
+            self.selected_nodes_b.clear()
             self.traced_chain_edges_a.clear()
             self.traced_chain_edges_b.clear()
-            self.full_chain_path_a.clear()
-            self.full_chain_path_b.clear()
+            self.full_chain_paths_a.clear()
+            self.full_chain_paths_b.clear()
 
         self.reset_chain_length_to_one()
         low, high = self.range_slider.getValues()
         self.on_range_changed(low, high)
 
     def on_trace_chain_toggled(self, checked):
-        if checked and self.global_max_edge_toggle.isChecked():
-            self.global_max_edge_toggle.blockSignals(True)
-            self.global_max_edge_toggle.setChecked(False)
-            self.global_max_edge_toggle.blockSignals(False)
+        if checked:
+            if self.global_max_edge_toggle.isChecked():
+                self.global_max_edge_toggle.blockSignals(True)
+                self.global_max_edge_toggle.setChecked(False)
+                self.global_max_edge_toggle.blockSignals(False)
+
+            if self.top_slab_toggle.isChecked():
+                self.top_slab_toggle.blockSignals(True)
+                self.top_slab_toggle.setChecked(False)
+                self.top_slab_toggle.blockSignals(False)
+                self.slab_thick_slider.setEnabled(False)
+                self.slab_k_slider.setEnabled(False)
 
         self.chain_length_slider.setEnabled(checked)
         self.chain_length_input.setEnabled(checked)
+        self.seed_id_input.setEnabled(checked)
+        self.seed_apply_btn.setEnabled(checked)
+
         if not checked:
+            self.selected_nodes_a.clear()
+            self.selected_nodes_b.clear()
             self.traced_chain_edges_a.clear()
             self.traced_chain_edges_b.clear()
-            self.full_chain_path_a.clear()
-            self.full_chain_path_b.clear()
+            self.full_chain_paths_a.clear()
+            self.full_chain_paths_b.clear()
             self.active_chain_root_node = -1
+            self.seed_id_input.clear()
             self.reset_chain_length_to_one()
             self.update_particle_colors()
             self.update_right_subgraph()
@@ -1153,7 +1353,7 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.chain_length_input.setText(str(val))
         self.chain_length_input.blockSignals(False)
 
-        if self.trace_chain_toggle.isChecked() and self.active_chain_root_node != -1:
+        if (self.trace_chain_toggle.isChecked() and self.active_chain_root_node != -1) or self.top_slab_toggle.isChecked():
             self._apply_chain_length(val)
 
     def on_chain_length_text_applied(self):
@@ -1167,29 +1367,25 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.chain_length_slider.setValue(val)
         self.chain_length_input.setText(str(val))
 
-        if self.trace_chain_toggle.isChecked() and self.active_chain_root_node != -1:
+        if (self.trace_chain_toggle.isChecked() and self.active_chain_root_node != -1) or self.top_slab_toggle.isChecked():
             self._apply_chain_length(val)
 
     def _recalculate_full_chains_and_update(self, start_node):
-        """
-        Precomputes the entire greedy trajectory for Volume A and Volume B.
-        Adapts the length slider range to max(len(path_a), len(path_b)).
-        """
         self.active_chain_root_node = start_node
-        self.full_chain_path_a = self._trace_full_single_volume_path(
-            start_node, self.active_edges_a, self.node_weights_a
-        )
-        self.full_chain_path_b = self._trace_full_single_volume_path(
-            start_node, self.active_edges_b, self.node_weights_b
-        )
+        self.seed_id_input.blockSignals(True)
+        self.seed_id_input.setText(str(self.ball_ids[start_node]))
+        self.seed_id_input.blockSignals(False)
 
-        len_a = len(self.full_chain_path_a)
-        len_b = len(self.full_chain_path_b)
-        max_possible_len = max(len_a, len_b, 1)
+        path_a = self._trace_full_single_volume_path(start_node, self.active_edges_a, self.node_weights_a)
+        path_b = self._trace_full_single_volume_path(start_node, self.active_edges_b, self.node_weights_b)
+
+        self.full_chain_paths_a = [path_a]
+        self.full_chain_paths_b = [path_b]
+
+        max_possible_len = max(len(path_a), len(path_b), 1)
 
         self.chain_length_slider.blockSignals(True)
         self.chain_length_input.blockSignals(True)
-
         self.chain_length_slider.setRange(1, max_possible_len)
         self.chain_length_validator.setRange(1, max_possible_len)
 
@@ -1206,18 +1402,29 @@ class DualPanelForceChainBuilder(QMainWindow):
         self._apply_chain_length(current_len)
 
     def _apply_chain_length(self, target_length):
-        sub_path_a = self.full_chain_path_a[:target_length]
-        sub_path_b = self.full_chain_path_b[:target_length]
-
+        nodes_a = set()
+        nodes_b = set()
         edges_a = set()
-        for i in range(len(sub_path_a) - 1):
-            edges_a.add((min(sub_path_a[i], sub_path_a[i+1]), max(sub_path_a[i], sub_path_a[i+1])))
-
         edges_b = set()
-        for i in range(len(sub_path_b) - 1):
-            edges_b.add((min(sub_path_b[i], sub_path_b[i+1]), max(sub_path_b[i], sub_path_b[i+1])))
 
-        self.selected_node_indices = set(sub_path_a).union(set(sub_path_b))
+        # Slice all active paths for Volume A
+        for path_a in self.full_chain_paths_a:
+            sub_a = path_a[:target_length]
+            nodes_a.update(sub_a)
+            for i in range(len(sub_a) - 1):
+                edges_a.add((min(sub_a[i], sub_a[i+1]), max(sub_a[i], sub_a[i+1])))
+
+        # Slice all active paths for Volume B
+        for path_b in self.full_chain_paths_b:
+            sub_b = path_b[:target_length]
+            nodes_b.update(sub_b)
+            for i in range(len(sub_b) - 1):
+                edges_b.add((min(sub_b[i], sub_b[i+1]), max(sub_b[i], sub_b[i+1])))
+
+        self.selected_nodes_a = nodes_a
+        self.selected_nodes_b = nodes_b
+        self.selected_node_indices = self.selected_nodes_a.union(self.selected_nodes_b)
+
         self.traced_chain_edges_a = edges_a
         self.traced_chain_edges_b = edges_b
 
@@ -1335,10 +1542,6 @@ class DualPanelForceChainBuilder(QMainWindow):
         return list(unique_edges.values())
 
     def _trace_full_single_volume_path(self, start_node, active_edges, node_weights):
-        """
-        Traces the maximum possible greedy path until natural termination (dead end/boundary).
-        Returns ordered list of nodes.
-        """
         adj = {}
         for u, v, _ in active_edges:
             adj.setdefault(u, set()).add(v)
@@ -1367,7 +1570,6 @@ class DualPanelForceChainBuilder(QMainWindow):
         raw_edges_b = []
         mode = self.edge_mode_combo.currentText()
 
-        # 1. Edge-Level Thresholding per Dropdown Mode
         for (u, v, wa, wb) in self.all_edges:
             edge_a_active = (min_weight_threshold <= wa <= max_weight_threshold)
             edge_b_active = (min_weight_threshold <= wb <= max_weight_threshold)
@@ -1388,7 +1590,6 @@ class DualPanelForceChainBuilder(QMainWindow):
                 if edge_b_active:
                     raw_edges_b.append((u, v, wb))
 
-        # 2. Filter Highest Force Neighbor Chains if toggled
         if self.max_neighbor_toggle.isChecked():
             self.active_edges_a = self._filter_highest_force_neighbor_edges(raw_edges_a)
             self.active_edges_b = self._filter_highest_force_neighbor_edges(raw_edges_b)
@@ -1396,7 +1597,6 @@ class DualPanelForceChainBuilder(QMainWindow):
             self.active_edges_a = raw_edges_a
             self.active_edges_b = raw_edges_b
 
-        # 3. Node-Level Retention
         nodes_with_edges = set()
         for (u, v, _) in self.active_edges_a:
             nodes_with_edges.add(u)
@@ -1546,8 +1746,9 @@ class DualPanelForceChainBuilder(QMainWindow):
         else:
             self.left_actor_chains_b.SetVisibility(False)
 
-        # Refresh adaptive chain walk if an origin particle is currently active
-        if self.trace_chain_toggle.isChecked() and self.active_chain_root_node != -1:
+        if self.top_slab_toggle.isChecked():
+            self._recalculate_top_slab_chains()
+        elif self.trace_chain_toggle.isChecked() and self.active_chain_root_node != -1:
             self._recalculate_full_chains_and_update(self.active_chain_root_node)
 
         self.sync_clipping_ranges()
@@ -1651,7 +1852,6 @@ class DualPanelForceChainBuilder(QMainWindow):
                 self.update_matrix_view()
             return
 
-        # Keep original sphere endpoints positions exactly at particle centroids
         selected_coords = self.coords[self.current_selected_nodes_right]
         pts = vtk.vtkPoints()
         pts.SetData(numpy_to_vtk(selected_coords, deep=True))
@@ -1661,7 +1861,7 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.right_actor_nodes.SetVisibility(True)
 
         delta_offset = 0.008
-        is_chain_active = self.trace_chain_toggle.isChecked()
+        is_chain_active = self.trace_chain_toggle.isChecked() or self.top_slab_toggle.isChecked()
         is_max_edge_active = self.global_max_edge_toggle.isChecked()
         ext_length = self.volume_span * 0.25
 
@@ -1671,9 +1871,9 @@ class DualPanelForceChainBuilder(QMainWindow):
                     return False
                 return (min(u, v) == min(max_edge_a[0], max_edge_a[1]) and 
                         max(u, v) == max(max_edge_a[0], max_edge_a[1]))
-            if not is_chain_active or len(self.traced_chain_edges_a) == 0:
-                return (u in self.selected_node_indices and v in self.selected_node_indices)
-            return (min(u, v), max(u, v)) in self.traced_chain_edges_a
+            if is_chain_active:
+                return (min(u, v), max(u, v)) in self.traced_chain_edges_a
+            return (u in self.selected_node_indices and v in self.selected_node_indices)
 
         def is_edge_allowed_b(u, v):
             if is_max_edge_active:
@@ -1681,9 +1881,9 @@ class DualPanelForceChainBuilder(QMainWindow):
                     return False
                 return (min(u, v) == min(max_edge_b[0], max_edge_b[1]) and 
                         max(u, v) == max(max_edge_b[0], max_edge_b[1]))
-            if not is_chain_active or len(self.traced_chain_edges_b) == 0:
-                return (u in self.selected_node_indices and v in self.selected_node_indices)
-            return (min(u, v), max(u, v)) in self.traced_chain_edges_b
+            if is_chain_active:
+                return (min(u, v), max(u, v)) in self.traced_chain_edges_b
+            return (u in self.selected_node_indices and v in self.selected_node_indices)
 
         # --- Right Subgraph Volume A Parallel Edges ---
         lines_a = vtk.vtkCellArray()
@@ -1699,7 +1899,6 @@ class DualPanelForceChainBuilder(QMainWindow):
                 if norm_vec < 1e-9: continue
                 u_dir = vec / norm_vec
 
-                # Line extension along original direction for Max Edge mode
                 if is_max_edge_active:
                     p1 = p1 - ext_length * u_dir
                     p2 = p2 + ext_length * u_dir
@@ -1736,7 +1935,6 @@ class DualPanelForceChainBuilder(QMainWindow):
                 if norm_vec < 1e-9: continue
                 u_dir = vec / norm_vec
 
-                # Line extension along original direction for Max Edge mode
                 if is_max_edge_active:
                     p1 = p1 - ext_length * u_dir
                     p2 = p2 + ext_length * u_dir
@@ -1759,7 +1957,6 @@ class DualPanelForceChainBuilder(QMainWindow):
                 edge_weight_list_b.append(wb)
                 pt_idx_b += 2
 
-        # Set thicker lines when highlighting the single extended maximum edge
         line_width = 3.2 if is_max_edge_active else (2.2 if self.max_neighbor_toggle.isChecked() else 1.0)
         self.right_actor_chains_a.GetProperty().SetLineWidth(line_width)
         self.right_actor_chains_b.GetProperty().SetLineWidth(line_width)
@@ -1803,11 +2000,14 @@ class DualPanelForceChainBuilder(QMainWindow):
 
     def clear_selection(self):
         self.selected_node_indices.clear()
+        self.selected_nodes_a.clear()
+        self.selected_nodes_b.clear()
         self.traced_chain_edges_a.clear()
         self.traced_chain_edges_b.clear()
-        self.full_chain_path_a.clear()
-        self.full_chain_path_b.clear()
+        self.full_chain_paths_a.clear()
+        self.full_chain_paths_b.clear()
         self.active_chain_root_node = -1
+        self.seed_id_input.clear()
         self.reset_chain_length_to_one()
         self.update_particle_colors()
         self.update_right_subgraph()
@@ -1861,15 +2061,20 @@ class DualPanelForceChainBuilder(QMainWindow):
     def on_left_mouse_click(self, obj, event):
         picked_id = self.get_picked_particle_id_left()
         if picked_id != -1:
-            if self.trace_chain_toggle.isChecked():
+            if self.top_slab_toggle.isChecked():
+                pass  # Slabs drive seeds automatically
+            elif self.trace_chain_toggle.isChecked():
                 self.reset_chain_length_to_one()
                 self._recalculate_full_chains_and_update(picked_id)
             else:
                 self.active_chain_root_node = -1
+                self.seed_id_input.clear()
+                self.selected_nodes_a.clear()
+                self.selected_nodes_b.clear()
                 self.traced_chain_edges_a.clear()
                 self.traced_chain_edges_b.clear()
-                self.full_chain_path_a.clear()
-                self.full_chain_path_b.clear()
+                self.full_chain_paths_a.clear()
+                self.full_chain_paths_b.clear()
                 self.reset_chain_length_to_one()
                 if picked_id in self.selected_node_indices:
                     self.selected_node_indices.remove(picked_id)
@@ -1892,11 +2097,14 @@ class DualPanelForceChainBuilder(QMainWindow):
         picked_id = self.get_picked_particle_id_right()
         if picked_id != -1 and picked_id in self.selected_node_indices:
             self.selected_node_indices.remove(picked_id)
+            self.selected_nodes_a.discard(picked_id)
+            self.selected_nodes_b.discard(picked_id)
             self.traced_chain_edges_a.clear()
             self.traced_chain_edges_b.clear()
-            self.full_chain_path_a.clear()
-            self.full_chain_path_b.clear()
+            self.full_chain_paths_a.clear()
+            self.full_chain_paths_b.clear()
             self.active_chain_root_node = -1
+            self.seed_id_input.clear()
             self.reset_chain_length_to_one()
             self.update_particle_colors()
             self.update_right_subgraph()

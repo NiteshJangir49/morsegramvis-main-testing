@@ -84,17 +84,20 @@ class RangeSlider(QWidget):
 
         track_rect = QRectF(self.handle_radius, cy - 2.5, w - 2 * self.handle_radius, 5)
 
+        # 1. Background Track
         painter.setBrush(QBrush(QColor("#333333")))
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(track_rect, 2.5, 2.5)
 
+        # 2. Active Span Between Low and High (Neutral subtle gray)
         low_x = self._val_to_pos(self.low_val)
         high_x = self._val_to_pos(self.high_val)
 
         span_rect = QRectF(low_x, cy - 2.5, max(0.0, high_x - low_x), 5)
-        painter.setBrush(QBrush(QColor("#00bcd4")))
+        painter.setBrush(QBrush(QColor("#777777")))
         painter.drawRoundedRect(span_rect, 2.5, 2.5)
 
+        # 3. Ruler Ticks Below Track
         major_pen = QPen(QColor("#999999"), 1.0)
         minor_pen = QPen(QColor("#555555"), 0.8)
 
@@ -111,11 +114,12 @@ class RangeSlider(QWidget):
                 painter.setPen(minor_pen)
                 painter.drawLine(int(tx), int(tick_top), int(tx), int(tick_top + 2.0))
 
+        # 4. Numeric Value Labels
         font = QFont()
         font.setPointSize(7)
         font.setBold(True)
         painter.setFont(font)
-        painter.setPen(QColor("#aaaaaa"))
+        painter.setPen(QColor("#ffffff"))
 
         label_y = tick_top + 7.0
         label_h = 13.0
@@ -135,10 +139,10 @@ class RangeSlider(QWidget):
         rect_100 = QRectF(pos_100 - 25, label_y, 40, label_h)
         painter.drawText(rect_100, Qt.AlignHCenter | Qt.AlignTop, f"{self.max_force_val:.2f}")
 
-        for x, color, border in [(low_x, QColor("#00e6ff"), QColor("#ffffff")), 
-                                 (high_x, QColor("#ff9800"), QColor("#ffffff"))]:
-            painter.setBrush(QBrush(color))
-            painter.setPen(QPen(border, 1.2))
+        # 5. Interactive Handles (Both colored solid white)
+        for x in [low_x, high_x]:
+            painter.setBrush(QBrush(QColor("#ffffff")))
+            painter.setPen(QPen(QColor("#bbbbbb"), 1.2))
             painter.drawEllipse(QRectF(x - self.handle_radius, cy - self.handle_radius, 
                                        2 * self.handle_radius, 2 * self.handle_radius))
 
@@ -411,24 +415,21 @@ def load_real_and_predicted_data(assembly_id=58, timestep=80):
                 adj_matrix[u, v] = adj_matrix[v, u] = 1
                 weights_a[u, v] = weights_a[v, u] = min(node_weights_a[u], node_weights_a[v])
                 weights_b[u, v] = weights_b[v, u] = min(node_weights_b[u], node_weights_b[v])
-    elif os.path.exists(pred_contact_path):
-        df_contacts = pd.read_csv(pred_contact_path)
+
+    target_pred_csv = pred_contact_path if os.path.exists(pred_contact_path) else (contact_pairs_path if os.path.exists(contact_pairs_path) else None)
+    if target_pred_csv:
+        df_contacts = pd.read_csv(target_pred_csv)
+        has_custom_force = 'predicted_force' in df_contacts.columns or 'contact_force' in df_contacts.columns
         for _, row in df_contacts.iterrows():
             u_id, v_id = int(row['sender_id']), int(row['receiver_id'])
             if u_id in id_to_idx and v_id in id_to_idx:
                 u, v = id_to_idx[u_id], id_to_idx[v_id]
                 adj_matrix[u, v] = adj_matrix[v, u] = 1
-                weights_a[u, v] = weights_a[v, u] = min(node_weights_a[u], node_weights_a[v])
-                weights_b[u, v] = weights_b[v, u] = min(node_weights_b[u], node_weights_b[v])
-    elif os.path.exists(contact_pairs_path):
-        df_pairs = pd.read_csv(contact_pairs_path)
-        for _, row in df_pairs.iterrows():
-            u_id, v_id = int(row['sender_id']), int(row['receiver_id'])
-            if u_id in id_to_idx and v_id in id_to_idx:
-                u, v = id_to_idx[u_id], id_to_idx[v_id]
-                adj_matrix[u, v] = adj_matrix[v, u] = 1
-                weights_a[u, v] = weights_a[v, u] = min(node_weights_a[u], node_weights_a[v])
-                weights_b[u, v] = weights_b[v, u] = min(node_weights_b[u], node_weights_b[v])
+                if has_custom_force:
+                    force_col = 'predicted_force' if 'predicted_force' in df_contacts.columns else 'contact_force'
+                    weights_b[u, v] = weights_b[v, u] = float(row[force_col])
+                else:
+                    weights_b[u, v] = weights_b[v, u] = min(node_weights_b[u], node_weights_b[v])
 
     return adj_matrix, weights_a, weights_b, node_weights_a, node_weights_b, coords, ball_ids
 
@@ -558,7 +559,7 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.current_timestep = initial_timestep
 
         self.setWindowTitle(f"Parallel Force Chains - (Assembly {self.current_assembly}, Timestep {self.current_timestep})")
-        self.setGeometry(30, 40, 1820, 880)
+        self.setGeometry(30, 40, 1850, 880)
 
         adj_matrix, weights_a, weights_b, node_weights_a, node_weights_b, coords, ball_ids = load_real_and_predicted_data(
             self.current_assembly, self.current_timestep
@@ -589,7 +590,6 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.traced_chain_edges_a = set()
         self.traced_chain_edges_b = set()
 
-        # Multi-seed path storage: list of paths for each root seed
         self.full_chain_paths_a = []
         self.full_chain_paths_b = []
         self.active_chain_root_node = -1
@@ -632,17 +632,18 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.min_weight_input = QLineEdit("0.00")
         self.min_weight_input.setFixedWidth(38)
         self.min_weight_input.setAlignment(Qt.AlignCenter)
-        self.min_weight_input.setStyleSheet("""
+        white_input_style = """
             QLineEdit {
                 font-weight: bold;
                 font-size: 8.5pt;
-                color: #00e6ff;
+                color: #ffffff;
                 background-color: #222222;
                 border: 1px solid #555555;
                 border-radius: 3px;
                 padding: 1px;
             }
-        """)
+        """
+        self.min_weight_input.setStyleSheet(white_input_style)
         self.min_weight_input.returnPressed.connect(self.on_manual_range_applied)
         control_layout.addWidget(self.min_weight_input)
 
@@ -654,17 +655,7 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.max_weight_input = QLineEdit(f"{self.global_max_w:.2f}")
         self.max_weight_input.setFixedWidth(38)
         self.max_weight_input.setAlignment(Qt.AlignCenter)
-        self.max_weight_input.setStyleSheet("""
-            QLineEdit {
-                font-weight: bold;
-                font-size: 8.5pt;
-                color: #ff9800;
-                background-color: #222222;
-                border: 1px solid #555555;
-                border-radius: 3px;
-                padding: 1px;
-            }
-        """)
+        self.max_weight_input.setStyleSheet(white_input_style)
         self.max_weight_input.returnPressed.connect(self.on_manual_range_applied)
         control_layout.addWidget(self.max_weight_input)
 
@@ -687,21 +678,13 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         control_layout.addSpacing(3)
 
-        # 4. Global Max-Magnitude Edge Toggle
-        self.global_max_edge_toggle = QCheckBox("Max Edge")
-        self.global_max_edge_toggle.setChecked(False)
-        self.global_max_edge_toggle.setStyleSheet("font-weight: bold; color: #ff9933; font-size: 8.5pt;")
-        self.global_max_edge_toggle.toggled.connect(self.on_global_max_edge_toggled)
-        control_layout.addWidget(self.global_max_edge_toggle)
-
-        control_layout.addSpacing(3)
-
-        # 5. Top Slab Seeds Controls (Thickness: 1-10%, K: 1-10)
-        self.top_slab_toggle = QCheckBox("Top Slab Seeds")
-        self.top_slab_toggle.setChecked(False)
-        self.top_slab_toggle.setStyleSheet("font-weight: bold; color: #ffeb3b; font-size: 8.5pt;")
-        self.top_slab_toggle.toggled.connect(self.on_top_slab_toggled)
-        control_layout.addWidget(self.top_slab_toggle)
+        # 4. Slab Selection Dropdown (Off, Upper Slab, Lower Slab) & Controls
+        control_layout.addWidget(QLabel("<b>Slab:</b>"))
+        self.slab_mode_combo = QComboBox()
+        self.slab_mode_combo.addItems(["Off", "Upper Slab", "Lower Slab"])
+        self.slab_mode_combo.setStyleSheet("font-weight: bold; color: #ffeb3b; font-size: 8.5pt;")
+        self.slab_mode_combo.currentIndexChanged.connect(self.on_slab_mode_changed)
+        control_layout.addWidget(self.slab_mode_combo)
 
         self.slab_thick_label = QLabel("Thick: 5%")
         self.slab_thick_label.setStyleSheet("font-size: 8pt; color: #ffeb3b;")
@@ -729,7 +712,7 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         control_layout.addSpacing(3)
 
-        # 6. Single Chain Origin Trace Toggle, Seed ID Entry, and Chain Length Controls
+        # 5. Single Chain Origin Trace Toggle, Seed ID Entry, and Chain Length Controls
         self.trace_chain_toggle = QCheckBox("Trace Click")
         self.trace_chain_toggle.setChecked(False)
         self.trace_chain_toggle.setStyleSheet("font-weight: bold; color: #00ffaa; font-size: 8.5pt;")
@@ -787,6 +770,26 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.chain_length_input.setValidator(self.chain_length_validator)
         self.chain_length_input.returnPressed.connect(self.on_chain_length_text_applied)
         control_layout.addWidget(self.chain_length_input)
+
+        control_layout.addSpacing(3)
+
+        # 6. Dedicated Gauss Map Toggle for Current Volume (Active only on Only from A or Only from B)
+        self.gauss_toggle = QCheckBox("Gauss Map (Left View)")
+        self.gauss_toggle.setChecked(False)
+        self.gauss_toggle.setEnabled(False)
+        self.gauss_toggle.setToolTip("Select 'Only from A' or 'Only from B' in Edge Filter to enable Gauss Map")
+        self.gauss_toggle.setStyleSheet("""
+            QCheckBox {
+                font-weight: bold; 
+                color: #ff77ff; 
+                font-size: 8.5pt;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+        """)
+        self.gauss_toggle.toggled.connect(self.on_gauss_toggled)
+        control_layout.addWidget(self.gauss_toggle)
 
         control_layout.addSpacing(3)
 
@@ -890,28 +893,38 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.chain_length_slider.blockSignals(False)
         self.chain_length_input.blockSignals(False)
 
-    def on_top_slab_toggled(self, checked):
-        self.slab_thick_slider.setEnabled(checked)
-        self.slab_k_slider.setEnabled(checked)
-        self.chain_length_slider.setEnabled(checked)
-        self.chain_length_input.setEnabled(checked)
-
+    def on_gauss_toggled(self, checked):
         if checked:
-            # Uncheck single click & max edge modes
+            if self.trace_chain_toggle.isChecked():
+                self.trace_chain_toggle.setChecked(False)
+            if self.slab_mode_combo.currentText() != "Off":
+                self.slab_mode_combo.setCurrentText("Off")
+
+        self.update_right_subgraph()
+
+    def on_slab_mode_changed(self, index):
+        mode = self.slab_mode_combo.currentText()
+        is_active = (mode != "Off")
+
+        self.slab_thick_slider.setEnabled(is_active)
+        self.slab_k_slider.setEnabled(is_active)
+        self.chain_length_slider.setEnabled(is_active)
+        self.chain_length_input.setEnabled(is_active)
+
+        if is_active:
+            if self.gauss_toggle.isChecked():
+                self.gauss_toggle.setChecked(False)
+
             self.trace_chain_toggle.blockSignals(True)
             self.trace_chain_toggle.setChecked(False)
             self.trace_chain_toggle.blockSignals(False)
-
-            self.global_max_edge_toggle.blockSignals(True)
-            self.global_max_edge_toggle.setChecked(False)
-            self.global_max_edge_toggle.blockSignals(False)
 
             self.seed_id_input.setEnabled(False)
             self.seed_apply_btn.setEnabled(False)
             self.seed_id_input.clear()
 
             self.reset_chain_length_to_one()
-            self._recalculate_top_slab_chains()
+            self._recalculate_slab_chains()
         else:
             self.full_chain_paths_a.clear()
             self.full_chain_paths_b.clear()
@@ -931,25 +944,31 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.slab_thick_label.setText(f"Thick: {pct}%")
         self.slab_k_label.setText(f"K: {k}")
 
-        if self.top_slab_toggle.isChecked():
+        if self.slab_mode_combo.currentText() != "Off":
             self.reset_chain_length_to_one()
-            self._recalculate_top_slab_chains()
+            self._recalculate_slab_chains()
 
-    def _recalculate_top_slab_chains(self):
-        """
-        Identifies top-K weighted particles within the upper XY slab (1-10% of Z)
-        and independently traces full paths for Volume A and Volume B.
-        """
+    def _recalculate_slab_chains(self):
+        mode = self.slab_mode_combo.currentText()
+        if mode == "Off":
+            return
+
         pct = self.slab_thick_slider.value()
         k = self.slab_k_slider.value()
         z_thickness = (pct / 100.0) * (self.z_max - self.z_min)
-        z_threshold = self.z_max - z_thickness
 
-        # Find visible candidate particles whose Z coordinate lies within the top slab
-        slab_candidates = [
-            idx for idx in self.active_visible_nodes_left 
-            if self.coords[idx, 2] >= z_threshold
-        ]
+        if mode == "Upper Slab":
+            z_threshold = self.z_max - z_thickness
+            slab_candidates = [
+                idx for idx in self.active_visible_nodes_left 
+                if self.coords[idx, 2] >= z_threshold
+            ]
+        else:  # Lower Slab
+            z_threshold = self.z_min + z_thickness
+            slab_candidates = [
+                idx for idx in self.active_visible_nodes_left 
+                if self.coords[idx, 2] <= z_threshold
+            ]
 
         if not slab_candidates:
             self.full_chain_paths_a.clear()
@@ -964,7 +983,6 @@ class DualPanelForceChainBuilder(QMainWindow):
             self.vtk_left.GetRenderWindow().Render()
             return
 
-        # Rank candidates by composite force weight (max across Vol A & B)
         slab_candidates.sort(key=lambda idx: max(self.node_weights_a[idx], self.node_weights_b[idx]), reverse=True)
         top_k_seeds = slab_candidates[:k]
 
@@ -1088,6 +1106,13 @@ class DualPanelForceChainBuilder(QMainWindow):
             g = (0.68 * (1.0 - t)**1.5 + 0.0 * t)
             b = (0.0 * (1.0 - t) + 0.05 * t)
             lut.SetTableValue(i, r, g, b, 1.0)
+        lut.Build()
+        return lut
+
+    def create_lut_gauss(self):
+        lut = vtk.vtkLookupTable()
+        lut.SetNumberOfTableValues(256)
+        lut.SetHueRange(0.667, 0.0)
         lut.Build()
         return lut
 
@@ -1242,6 +1267,63 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.right_actor_chains_b.GetProperty().SetLineWidth(1.0)
         self.ren_right.AddActor(self.right_actor_chains_b)
 
+        # ======================================================================
+        # 3D GAUSS MAP HEMISPHERE & COLORBAR ACTORS
+        # ======================================================================
+        self.lut_gauss = self.create_lut_gauss()
+
+        # 1. Colored Surface
+        self.gauss_surface_polydata = vtk.vtkPolyData()
+        self.gauss_surface_mapper = vtk.vtkPolyDataMapper()
+        self.gauss_surface_mapper.SetInputData(self.gauss_surface_polydata)
+        self.gauss_surface_mapper.SetLookupTable(self.lut_gauss)
+        self.gauss_surface_mapper.SetScalarModeToUseCellData()
+
+        self.gauss_surface_actor = vtk.vtkActor()
+        self.gauss_surface_actor.SetMapper(self.gauss_surface_mapper)
+        self.gauss_surface_actor.GetProperty().SetOpacity(0.92)
+        self.gauss_surface_actor.GetProperty().SetSpecular(0.25)
+        self.gauss_surface_actor.SetVisibility(False)
+        self.ren_right.AddActor(self.gauss_surface_actor)
+
+        # 2. Wireframe Reference Grid
+        self.gauss_wire_mapper = vtk.vtkPolyDataMapper()
+        self.gauss_wire_mapper.SetInputData(self.gauss_surface_polydata)
+        self.gauss_wire_mapper.ScalarVisibilityOff()
+
+        self.gauss_wire_actor = vtk.vtkActor()
+        self.gauss_wire_actor.SetMapper(self.gauss_wire_mapper)
+        self.gauss_wire_actor.GetProperty().SetRepresentationToWireframe()
+        self.gauss_wire_actor.GetProperty().SetColor(0.2, 0.2, 0.3)
+        self.gauss_wire_actor.GetProperty().SetLineWidth(0.8)
+        self.gauss_wire_actor.SetVisibility(False)
+        self.ren_right.AddActor(self.gauss_wire_actor)
+
+        # 3. Equator Baseline Circle
+        self.gauss_equator_polydata = vtk.vtkPolyData()
+        self.gauss_equator_mapper = vtk.vtkPolyDataMapper()
+        self.gauss_equator_mapper.SetInputData(self.gauss_equator_polydata)
+
+        self.gauss_equator_actor = vtk.vtkActor()
+        self.gauss_equator_actor.SetMapper(self.gauss_equator_mapper)
+        self.gauss_equator_actor.GetProperty().SetColor(0.7, 0.7, 0.8)
+        self.gauss_equator_actor.GetProperty().SetLineWidth(2.0)
+        self.gauss_equator_actor.SetVisibility(False)
+        self.ren_right.AddActor(self.gauss_equator_actor)
+
+        # 4. Scalar Color Bar with Ticks & Values (Title Removed)
+        self.scalar_bar = vtk.vtkScalarBarActor()
+        self.scalar_bar.SetLookupTable(self.lut_gauss)
+        self.scalar_bar.SetTitle("")
+        self.scalar_bar.SetNumberOfLabels(5)
+        self.scalar_bar.SetWidth(0.09)
+        self.scalar_bar.SetHeight(0.40)
+        self.scalar_bar.GetPositionCoordinate().SetValue(0.88, 0.30)
+        self.scalar_bar.GetLabelTextProperty().SetColor(0.95, 0.95, 0.95)
+        self.scalar_bar.GetLabelTextProperty().SetFontSize(8)
+        self.scalar_bar.SetVisibility(False)
+        self.ren_right.AddActor2D(self.scalar_bar)
+
         self.right_axes_widget, self.right_axes_actor = self._setup_orientation_axes_widget(self.vtk_right)
 
         self.splitter.addWidget(right_container)
@@ -1271,57 +1353,19 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.vtk_right.GetRenderWindow().Render()
 
     def on_max_neighbor_toggled(self, checked):
-        if checked and self.global_max_edge_toggle.isChecked():
-            self.global_max_edge_toggle.blockSignals(True)
-            self.global_max_edge_toggle.setChecked(False)
-            self.global_max_edge_toggle.blockSignals(False)
-        self.reset_chain_length_to_one()
-        low, high = self.range_slider.getValues()
-        self.on_range_changed(low, high)
-
-    def on_global_max_edge_toggled(self, checked):
-        if checked:
-            self.max_neighbor_toggle.blockSignals(True)
-            self.max_neighbor_toggle.setChecked(False)
-            self.max_neighbor_toggle.blockSignals(False)
-
-            self.trace_chain_toggle.blockSignals(True)
-            self.trace_chain_toggle.setChecked(False)
-            self.trace_chain_toggle.blockSignals(False)
-
-            self.top_slab_toggle.blockSignals(True)
-            self.top_slab_toggle.setChecked(False)
-            self.top_slab_toggle.blockSignals(False)
-            self.slab_thick_slider.setEnabled(False)
-            self.slab_k_slider.setEnabled(False)
-
-            self.chain_length_slider.setEnabled(False)
-            self.chain_length_input.setEnabled(False)
-            self.seed_id_input.setEnabled(False)
-            self.seed_apply_btn.setEnabled(False)
-            self.active_chain_root_node = -1
-            self.selected_nodes_a.clear()
-            self.selected_nodes_b.clear()
-            self.traced_chain_edges_a.clear()
-            self.traced_chain_edges_b.clear()
-            self.full_chain_paths_a.clear()
-            self.full_chain_paths_b.clear()
-
         self.reset_chain_length_to_one()
         low, high = self.range_slider.getValues()
         self.on_range_changed(low, high)
 
     def on_trace_chain_toggled(self, checked):
         if checked:
-            if self.global_max_edge_toggle.isChecked():
-                self.global_max_edge_toggle.blockSignals(True)
-                self.global_max_edge_toggle.setChecked(False)
-                self.global_max_edge_toggle.blockSignals(False)
+            if self.gauss_toggle.isChecked():
+                self.gauss_toggle.setChecked(False)
 
-            if self.top_slab_toggle.isChecked():
-                self.top_slab_toggle.blockSignals(True)
-                self.top_slab_toggle.setChecked(False)
-                self.top_slab_toggle.blockSignals(False)
+            if self.slab_mode_combo.currentText() != "Off":
+                self.slab_mode_combo.blockSignals(True)
+                self.slab_mode_combo.setCurrentText("Off")
+                self.slab_mode_combo.blockSignals(False)
                 self.slab_thick_slider.setEnabled(False)
                 self.slab_k_slider.setEnabled(False)
 
@@ -1353,7 +1397,8 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.chain_length_input.setText(str(val))
         self.chain_length_input.blockSignals(False)
 
-        if (self.trace_chain_toggle.isChecked() and self.active_chain_root_node != -1) or self.top_slab_toggle.isChecked():
+        is_slab_active = (self.slab_mode_combo.currentText() != "Off")
+        if (self.trace_chain_toggle.isChecked() and self.active_chain_root_node != -1) or is_slab_active:
             self._apply_chain_length(val)
 
     def on_chain_length_text_applied(self):
@@ -1367,7 +1412,8 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.chain_length_slider.setValue(val)
         self.chain_length_input.setText(str(val))
 
-        if (self.trace_chain_toggle.isChecked() and self.active_chain_root_node != -1) or self.top_slab_toggle.isChecked():
+        is_slab_active = (self.slab_mode_combo.currentText() != "Off")
+        if (self.trace_chain_toggle.isChecked() and self.active_chain_root_node != -1) or is_slab_active:
             self._apply_chain_length(val)
 
     def _recalculate_full_chains_and_update(self, start_node):
@@ -1407,14 +1453,12 @@ class DualPanelForceChainBuilder(QMainWindow):
         edges_a = set()
         edges_b = set()
 
-        # Slice all active paths for Volume A
         for path_a in self.full_chain_paths_a:
             sub_a = path_a[:target_length]
             nodes_a.update(sub_a)
             for i in range(len(sub_a) - 1):
                 edges_a.add((min(sub_a[i], sub_a[i+1]), max(sub_a[i], sub_a[i+1])))
 
-        # Slice all active paths for Volume B
         for path_b in self.full_chain_paths_b:
             sub_b = path_b[:target_length]
             nodes_b.update(sub_b)
@@ -1434,6 +1478,13 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.vtk_left.GetRenderWindow().Render()
 
     def on_edge_mode_changed(self, index):
+        mode = self.edge_mode_combo.currentText()
+        is_single_volume = (mode in ["Only from A", "Only from B"])
+
+        self.gauss_toggle.setEnabled(is_single_volume)
+        if not is_single_volume and self.gauss_toggle.isChecked():
+            self.gauss_toggle.setChecked(False)
+
         self.reset_chain_length_to_one()
         low, high = self.range_slider.getValues()
         self.on_range_changed(low, high)
@@ -1570,9 +1621,10 @@ class DualPanelForceChainBuilder(QMainWindow):
         raw_edges_b = []
         mode = self.edge_mode_combo.currentText()
 
+        # Strict independent thresholding
         for (u, v, wa, wb) in self.all_edges:
-            edge_a_active = (min_weight_threshold <= wa <= max_weight_threshold)
-            edge_b_active = (min_weight_threshold <= wb <= max_weight_threshold)
+            edge_a_active = (wa > 0 and min_weight_threshold <= wa <= max_weight_threshold)
+            edge_b_active = (wb > 0 and min_weight_threshold <= wb <= max_weight_threshold)
 
             if mode == "Only from A":
                 if edge_a_active:
@@ -1597,6 +1649,7 @@ class DualPanelForceChainBuilder(QMainWindow):
             self.active_edges_a = raw_edges_a
             self.active_edges_b = raw_edges_b
 
+        # Collect particles with active incident edges
         nodes_with_edges = set()
         for (u, v, _) in self.active_edges_a:
             nodes_with_edges.add(u)
@@ -1605,25 +1658,23 @@ class DualPanelForceChainBuilder(QMainWindow):
             nodes_with_edges.add(u)
             nodes_with_edges.add(v)
 
-        if self.max_neighbor_toggle.isChecked():
-            visible_nodes = set(nodes_with_edges)
-        else:
-            visible_nodes = set(nodes_with_edges)
-            for i in range(self.num_nodes):
-                if mode == "Only from A":
-                    if min_weight_threshold <= self.node_weights_a[i] <= max_weight_threshold:
-                        visible_nodes.add(i)
-                elif mode == "Only from B":
-                    if min_weight_threshold <= self.node_weights_b[i] <= max_weight_threshold:
-                        visible_nodes.add(i)
-                elif mode == "Both (Intersection)":
-                    if (min_weight_threshold <= self.node_weights_a[i] <= max_weight_threshold) and \
-                       (min_weight_threshold <= self.node_weights_b[i] <= max_weight_threshold):
-                        visible_nodes.add(i)
-                else:  # Default (Union)
-                    if (min_weight_threshold <= self.node_weights_a[i] <= max_weight_threshold) or \
-                       (min_weight_threshold <= self.node_weights_b[i] <= max_weight_threshold):
-                        visible_nodes.add(i)
+        # UNIFIED NODE VISIBILITY: Include nodes touching edges AND nodes matching threshold directly
+        visible_nodes = set(nodes_with_edges)
+        for i in range(self.num_nodes):
+            if mode == "Only from A":
+                if min_weight_threshold <= self.node_weights_a[i] <= max_weight_threshold:
+                    visible_nodes.add(i)
+            elif mode == "Only from B":
+                if min_weight_threshold <= self.node_weights_b[i] <= max_weight_threshold:
+                    visible_nodes.add(i)
+            elif mode == "Both (Intersection)":
+                if (min_weight_threshold <= self.node_weights_a[i] <= max_weight_threshold) and \
+                   (min_weight_threshold <= self.node_weights_b[i] <= max_weight_threshold):
+                    visible_nodes.add(i)
+            else:  # Default (Union)
+                if (min_weight_threshold <= self.node_weights_a[i] <= max_weight_threshold) or \
+                   (min_weight_threshold <= self.node_weights_b[i] <= max_weight_threshold):
+                    visible_nodes.add(i)
 
         self.active_visible_nodes_left = sorted(list(visible_nodes))
 
@@ -1746,14 +1797,37 @@ class DualPanelForceChainBuilder(QMainWindow):
         else:
             self.left_actor_chains_b.SetVisibility(False)
 
-        if self.top_slab_toggle.isChecked():
-            self._recalculate_top_slab_chains()
+        if self.slab_mode_combo.currentText() != "Off":
+            self._recalculate_slab_chains()
         elif self.trace_chain_toggle.isChecked() and self.active_chain_root_node != -1:
             self._recalculate_full_chains_and_update(self.active_chain_root_node)
 
         self.sync_clipping_ranges()
         self.vtk_left.GetRenderWindow().Render()
         self.update_right_subgraph()
+
+        self.sync_clipping_ranges()
+        self.vtk_left.GetRenderWindow().Render()
+        self.update_right_subgraph()
+
+        # ======================================================================
+        # DIAGNOSTIC CHECK: Rogue Node Counter for Volume A vs Volume B
+        # ======================================================================
+        nodes_a_above_T = set(np.where(self.node_weights_a >= min_weight_threshold)[0])
+        edge_nodes_a = set()
+        for u, v, _ in self.active_edges_a:
+            edge_nodes_a.add(u)
+            edge_nodes_a.add(v)
+        rogue_a = nodes_a_above_T - edge_nodes_a
+
+        nodes_b_above_T = set(np.where(self.node_weights_b >= min_weight_threshold)[0])
+        edge_nodes_b = set()
+        for u, v, _ in self.active_edges_b:
+            edge_nodes_b.add(u)
+            edge_nodes_b.add(v)
+        rogue_b = nodes_b_above_T - edge_nodes_b
+
+        print(f"[Diagnostic T={min_weight_threshold:.2f}] Rogue Nodes -> Vol A: {len(rogue_a)} / {len(nodes_a_above_T)} | Vol B: {len(rogue_b)} / {len(nodes_b_above_T)}")
 
     def update_particle_colors(self):
         self.left_particle_colors.Reset()
@@ -1786,7 +1860,7 @@ class DualPanelForceChainBuilder(QMainWindow):
             self.ren_right.RemoveActor(actor)
         self.text_label_actors_right.clear()
 
-        if not self.show_ids_checkbox.isChecked():
+        if not self.show_ids_checkbox.isChecked() or self.gauss_toggle.isChecked():
             return
 
         active_cam = self.ren_right.GetActiveCamera()
@@ -1812,34 +1886,164 @@ class DualPanelForceChainBuilder(QMainWindow):
             self.ren_right.AddActor(txt_actor)
             self.text_label_actors_right.append(txt_actor)
 
+    def _generate_gauss_map_hemisphere(self, edges):
+        n_lat = 18   # 18 polar steps (5 degrees each)
+        n_lon = 36   # 36 azimuthal steps (10 degrees each)
+
+        counts = np.zeros((n_lat, n_lon), dtype=np.float32)
+
+        for u, v, _ in edges:
+            vec = self.coords[v] - self.coords[u]
+            norm_v = np.linalg.norm(vec)
+            if norm_v < 1e-9:
+                continue
+            n = vec / norm_v
+
+            # Undirected contact symmetry: flip to upper hemisphere (z >= 0)
+            if n[2] < 0:
+                n = -n
+
+            theta = np.arccos(np.clip(n[2], 0.0, 1.0))
+            phi = np.arctan2(n[1], n[0])
+            if phi < 0:
+                phi += 2.0 * np.pi
+
+            t_bin = min(int(theta / (0.5 * np.pi) * n_lat), n_lat - 1)
+            p_bin = min(int(phi / (2.0 * np.pi) * n_lon), n_lon - 1)
+            counts[t_bin, p_bin] += 1.0
+
+        max_count = float(np.max(counts))
+
+        R = self.volume_span * 0.4
+        center = np.mean(self.coords, axis=0)
+
+        theta_vals = np.linspace(0.0, 0.5 * np.pi, n_lat + 1)
+        phi_vals = np.linspace(0.0, 2.0 * np.pi, n_lon + 1)
+
+        pts = vtk.vtkPoints()
+
+        for i in range(n_lat + 1):
+            th = theta_vals[i]
+            sin_th = np.sin(th)
+            cos_th = np.cos(th)
+
+            for j in range(n_lon + 1):
+                ph = phi_vals[j]
+                x = center[0] + R * sin_th * np.cos(ph)
+                y = center[1] + R * sin_th * np.sin(ph)
+                z = center[2] + R * cos_th
+                pts.InsertNextPoint(x, y, z)
+
+        polys = vtk.vtkCellArray()
+        cell_scalars = vtk.vtkFloatArray()
+        cell_scalars.SetName("ContactCount")
+
+        for i in range(n_lat):
+            for j in range(n_lon):
+                idx0 = i * (n_lon + 1) + j
+                idx1 = idx0 + 1
+                idx2 = (i + 1) * (n_lon + 1) + (j + 1)
+                idx3 = (i + 1) * (n_lon + 1) + j
+
+                quad = vtk.vtkQuad()
+                quad.GetPointIds().SetId(0, idx0)
+                quad.GetPointIds().SetId(1, idx3)
+                quad.GetPointIds().SetId(2, idx2)
+                quad.GetPointIds().SetId(3, idx1)
+                polys.InsertNextCell(quad)
+
+                cell_scalars.InsertNextValue(counts[i, j])
+
+        # Base floor cap
+        floor_center_idx = pts.InsertNextPoint(center[0], center[1], center[2])
+        equator_start_idx = n_lat * (n_lon + 1)
+        for j in range(n_lon):
+            tri = vtk.vtkTriangle()
+            tri.GetPointIds().SetId(0, floor_center_idx)
+            tri.GetPointIds().SetId(1, equator_start_idx + j)
+            tri.GetPointIds().SetId(2, equator_start_idx + j + 1)
+            polys.InsertNextCell(tri)
+            cell_scalars.InsertNextValue(0.0)
+
+        polydata = vtk.vtkPolyData()
+        polydata.SetPoints(pts)
+        polydata.SetPolys(polys)
+        polydata.GetCellData().SetScalars(cell_scalars)
+
+        normals = vtk.vtkPolyDataNormals()
+        normals.SetInputData(polydata)
+        normals.ComputeCellNormalsOff()
+        normals.ComputePointNormalsOn()
+        normals.ConsistencyOn()
+        normals.AutoOrientNormalsOn()
+        normals.Update()
+
+        # Equator circle
+        equator_pts = vtk.vtkPoints()
+        equator_lines = vtk.vtkCellArray()
+        n_circ = 72
+        for k in range(n_circ + 1):
+            ang = (k / float(n_circ)) * 2.0 * np.pi
+            ex = center[0] + R * np.cos(ang)
+            ey = center[1] + R * np.sin(ang)
+            ez = center[2]
+            equator_pts.InsertNextPoint(ex, ey, ez)
+            if k > 0:
+                line = vtk.vtkLine()
+                line.GetPointIds().SetId(0, k - 1)
+                line.GetPointIds().SetId(1, k)
+                equator_lines.InsertNextCell(line)
+
+        equator_poly = vtk.vtkPolyData()
+        equator_poly.SetPoints(equator_pts)
+        equator_poly.SetLines(equator_lines)
+
+        return normals.GetOutput(), equator_poly, 0.0, max(1.0, max_count)
+
     def update_right_subgraph(self):
-        max_edge_a = None
-        max_edge_b = None
+        # ======================================================================
+        # MODE 1: 3D GAUSS MAP ON UPPER HEMISPHERE (ACTIVE ON ONLY A / ONLY B)
+        # ======================================================================
+        if self.gauss_toggle.isChecked():
+            self.right_actor_nodes.SetVisibility(False)
+            self.right_actor_chains_a.SetVisibility(False)
+            self.right_actor_chains_b.SetVisibility(False)
+            self.update_right_particle_id_labels()
 
-        if self.global_max_edge_toggle.isChecked():
-            max_val_a = -1.0
-            for (u, v, wa) in self.active_edges_a:
-                if wa > max_val_a:
-                    max_val_a = wa
-                    max_edge_a = (u, v, wa)
+            mode = self.edge_mode_combo.currentText()
+            edges = self.active_edges_a if mode == "Only from A" else self.active_edges_b
+            polydata, equator_poly, min_c, max_c = self._generate_gauss_map_hemisphere(edges)
 
-            max_val_b = -1.0
-            for (u, v, wb) in self.active_edges_b:
-                if wb > max_val_b:
-                    max_val_b = wb
-                    max_edge_b = (u, v, wb)
+            if polydata.GetNumberOfPoints() > 0:
+                self.gauss_surface_polydata.ShallowCopy(polydata)
+                self.gauss_surface_mapper.SetScalarRange(min_c, max_c)
+                self.lut_gauss.SetTableRange(min_c, max_c)
+                self.gauss_surface_actor.SetVisibility(True)
+                self.gauss_wire_actor.SetVisibility(True)
 
-            nodes_for_max = set()
-            if max_edge_a is not None:
-                nodes_for_max.add(max_edge_a[0])
-                nodes_for_max.add(max_edge_a[1])
-            if max_edge_b is not None:
-                nodes_for_max.add(max_edge_b[0])
-                nodes_for_max.add(max_edge_b[1])
+                self.gauss_equator_polydata.ShallowCopy(equator_poly)
+                self.gauss_equator_actor.SetVisibility(True)
 
-            self.current_selected_nodes_right = sorted(list(nodes_for_max))
-        else:
-            self.current_selected_nodes_right = sorted(list(self.selected_node_indices))
+                self.scalar_bar.SetVisibility(True)
+            else:
+                self.gauss_surface_actor.SetVisibility(False)
+                self.gauss_wire_actor.SetVisibility(False)
+                self.gauss_equator_actor.SetVisibility(False)
+                self.scalar_bar.SetVisibility(False)
+
+            self.sync_clipping_ranges()
+            self.vtk_right.GetRenderWindow().Render()
+            return
+
+        # ======================================================================
+        # MODE 2: STANDARD FORCE CHAINS & PARTICLES
+        # ======================================================================
+        self.gauss_surface_actor.SetVisibility(False)
+        self.gauss_wire_actor.SetVisibility(False)
+        self.gauss_equator_actor.SetVisibility(False)
+        self.scalar_bar.SetVisibility(False)
+
+        self.current_selected_nodes_right = sorted(list(self.selected_node_indices))
 
         if len(self.current_selected_nodes_right) == 0:
             self.right_actor_nodes.SetVisibility(False)
@@ -1861,26 +2065,14 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.right_actor_nodes.SetVisibility(True)
 
         delta_offset = 0.008
-        is_chain_active = self.trace_chain_toggle.isChecked() or self.top_slab_toggle.isChecked()
-        is_max_edge_active = self.global_max_edge_toggle.isChecked()
-        ext_length = self.volume_span * 0.25
+        is_chain_active = self.trace_chain_toggle.isChecked() or (self.slab_mode_combo.currentText() != "Off")
 
         def is_edge_allowed_a(u, v):
-            if is_max_edge_active:
-                if max_edge_a is None:
-                    return False
-                return (min(u, v) == min(max_edge_a[0], max_edge_a[1]) and 
-                        max(u, v) == max(max_edge_a[0], max_edge_a[1]))
             if is_chain_active:
                 return (min(u, v), max(u, v)) in self.traced_chain_edges_a
             return (u in self.selected_node_indices and v in self.selected_node_indices)
 
         def is_edge_allowed_b(u, v):
-            if is_max_edge_active:
-                if max_edge_b is None:
-                    return False
-                return (min(u, v) == min(max_edge_b[0], max_edge_b[1]) and 
-                        max(u, v) == max(max_edge_b[0], max_edge_b[1]))
             if is_chain_active:
                 return (min(u, v), max(u, v)) in self.traced_chain_edges_b
             return (u in self.selected_node_indices and v in self.selected_node_indices)
@@ -1898,10 +2090,6 @@ class DualPanelForceChainBuilder(QMainWindow):
                 norm_vec = np.linalg.norm(vec)
                 if norm_vec < 1e-9: continue
                 u_dir = vec / norm_vec
-
-                if is_max_edge_active:
-                    p1 = p1 - ext_length * u_dir
-                    p2 = p2 + ext_length * u_dir
 
                 ref = np.array([0, 0, 1.0], dtype=np.float32) if abs(u_dir[2]) < 0.9 else np.array([0, 1.0, 0], dtype=np.float32)
                 n_perp = np.cross(u_dir, ref)
@@ -1935,10 +2123,6 @@ class DualPanelForceChainBuilder(QMainWindow):
                 if norm_vec < 1e-9: continue
                 u_dir = vec / norm_vec
 
-                if is_max_edge_active:
-                    p1 = p1 - ext_length * u_dir
-                    p2 = p2 + ext_length * u_dir
-
                 ref = np.array([0, 0, 1.0], dtype=np.float32) if abs(u_dir[2]) < 0.9 else np.array([0, 1.0, 0], dtype=np.float32)
                 n_perp = np.cross(u_dir, ref)
                 n_perp = n_perp / np.linalg.norm(n_perp)
@@ -1957,7 +2141,7 @@ class DualPanelForceChainBuilder(QMainWindow):
                 edge_weight_list_b.append(wb)
                 pt_idx_b += 2
 
-        line_width = 3.2 if is_max_edge_active else (2.2 if self.max_neighbor_toggle.isChecked() else 1.0)
+        line_width = 2.2 if self.max_neighbor_toggle.isChecked() else 1.0
         self.right_actor_chains_a.GetProperty().SetLineWidth(line_width)
         self.right_actor_chains_b.GetProperty().SetLineWidth(line_width)
 
@@ -2061,8 +2245,8 @@ class DualPanelForceChainBuilder(QMainWindow):
     def on_left_mouse_click(self, obj, event):
         picked_id = self.get_picked_particle_id_left()
         if picked_id != -1:
-            if self.top_slab_toggle.isChecked():
-                pass  # Slabs drive seeds automatically
+            if self.slab_mode_combo.currentText() != "Off" or self.gauss_toggle.isChecked():
+                pass
             elif self.trace_chain_toggle.isChecked():
                 self.reset_chain_length_to_one()
                 self._recalculate_full_chains_and_update(picked_id)
@@ -2089,11 +2273,19 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.style_left.OnLeftButtonDown()
 
     def on_right_mouse_move(self, obj, event):
+        if self.gauss_toggle.isChecked():
+            self.style_right.OnMouseMove()
+            return
+
         picked_id = self.get_picked_particle_id_right()
         self.highlight_particle_center(picked_id)
         self.style_right.OnMouseMove()
 
     def on_right_mouse_click(self, obj, event):
+        if self.gauss_toggle.isChecked():
+            self.style_right.OnLeftButtonDown()
+            return
+
         picked_id = self.get_picked_particle_id_right()
         if picked_id != -1 and picked_id in self.selected_node_indices:
             self.selected_node_indices.remove(picked_id)

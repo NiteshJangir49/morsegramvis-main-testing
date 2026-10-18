@@ -629,9 +629,6 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         # 2. Dual Range Slider & Manual Text Input Bounds [0.00, max_force]
         control_layout.addWidget(QLabel("<b>Range:</b>"))
-        self.min_weight_input = QLineEdit("0.00")
-        self.min_weight_input.setFixedWidth(38)
-        self.min_weight_input.setAlignment(Qt.AlignCenter)
         white_input_style = """
             QLineEdit {
                 font-weight: bold;
@@ -643,6 +640,9 @@ class DualPanelForceChainBuilder(QMainWindow):
                 padding: 1px;
             }
         """
+        self.min_weight_input = QLineEdit("0.00")
+        self.min_weight_input.setFixedWidth(38)
+        self.min_weight_input.setAlignment(Qt.AlignCenter)
         self.min_weight_input.setStyleSheet(white_input_style)
         self.min_weight_input.returnPressed.connect(self.on_manual_range_applied)
         control_layout.addWidget(self.min_weight_input)
@@ -678,6 +678,20 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         control_layout.addSpacing(3)
 
+        btn_style = """
+            QPushButton {
+                font-weight: bold;
+                font-size: 8.5pt;
+                color: #ffffff;
+                background-color: #333333;
+                border: 1px solid #555555;
+                border-radius: 2px;
+            }
+            QPushButton:hover { background-color: #444444; }
+            QPushButton:pressed { background-color: #222222; }
+            QPushButton:disabled { color: #555555; border-color: #333333; }
+        """
+
         # 4. Slab Selection Dropdown (Off, Upper Slab, Lower Slab) & Controls
         control_layout.addWidget(QLabel("<b>Slab:</b>"))
         self.slab_mode_combo = QComboBox()
@@ -698,17 +712,25 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.slab_thick_slider.valueChanged.connect(self.on_slab_param_changed)
         control_layout.addWidget(self.slab_thick_slider)
 
+        # Unbounded K controls via buttons
+        self.slab_k_val = 5
         self.slab_k_label = QLabel("K: 5")
-        self.slab_k_label.setStyleSheet("font-size: 8pt; color: #ffeb3b;")
+        self.slab_k_label.setStyleSheet("font-size: 8pt; color: #ffeb3b; font-weight: bold;")
         control_layout.addWidget(self.slab_k_label)
 
-        self.slab_k_slider = QSlider(Qt.Horizontal)
-        self.slab_k_slider.setRange(1, 10)
-        self.slab_k_slider.setValue(5)
-        self.slab_k_slider.setFixedWidth(50)
-        self.slab_k_slider.setEnabled(False)
-        self.slab_k_slider.valueChanged.connect(self.on_slab_param_changed)
-        control_layout.addWidget(self.slab_k_slider)
+        self.slab_k_minus_btn = QPushButton("-")
+        self.slab_k_minus_btn.setFixedSize(18, 20)
+        self.slab_k_minus_btn.setStyleSheet(btn_style)
+        self.slab_k_minus_btn.setEnabled(False)
+        self.slab_k_minus_btn.clicked.connect(self.on_slab_k_minus)
+        control_layout.addWidget(self.slab_k_minus_btn)
+
+        self.slab_k_plus_btn = QPushButton("+")
+        self.slab_k_plus_btn.setFixedSize(18, 20)
+        self.slab_k_plus_btn.setStyleSheet(btn_style)
+        self.slab_k_plus_btn.setEnabled(False)
+        self.slab_k_plus_btn.clicked.connect(self.on_slab_k_plus)
+        control_layout.addWidget(self.slab_k_plus_btn)
 
         control_layout.addSpacing(3)
 
@@ -746,10 +768,27 @@ class DualPanelForceChainBuilder(QMainWindow):
         control_layout.addWidget(self.seed_apply_btn)
 
         control_layout.addWidget(QLabel("<b>Len:</b>"))
+
+        # Chain Length Decrement Button
+        self.chain_len_minus_btn = QPushButton("-")
+        self.chain_len_minus_btn.setFixedSize(18, 20)
+        self.chain_len_minus_btn.setStyleSheet(btn_style)
+        self.chain_len_minus_btn.setEnabled(False)
+        self.chain_len_minus_btn.clicked.connect(self.on_chain_len_minus)
+        control_layout.addWidget(self.chain_len_minus_btn)
+
         self.chain_length_slider = ChainLengthSlider(minimum=1, maximum=1, value=1)
         self.chain_length_slider.setEnabled(False)
         self.chain_length_slider.valueChanged.connect(self.on_chain_length_slider_changed)
         control_layout.addWidget(self.chain_length_slider)
+
+        # Chain Length Increment Button
+        self.chain_len_plus_btn = QPushButton("+")
+        self.chain_len_plus_btn.setFixedSize(18, 20)
+        self.chain_len_plus_btn.setStyleSheet(btn_style)
+        self.chain_len_plus_btn.setEnabled(False)
+        self.chain_len_plus_btn.clicked.connect(self.on_chain_len_plus)
+        control_layout.addWidget(self.chain_len_plus_btn)
 
         self.chain_length_input = QLineEdit("1")
         self.chain_length_input.setFixedWidth(28)
@@ -893,6 +932,31 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.chain_length_slider.blockSignals(False)
         self.chain_length_input.blockSignals(False)
 
+    def on_slab_k_minus(self):
+        if self.slab_k_val > 1:
+            self.slab_k_val -= 1
+            self.slab_k_label.setText(f"K: {self.slab_k_val}")
+            if self.slab_mode_combo.currentText() != "Off":
+                self.reset_chain_length_to_one()
+                self._recalculate_slab_chains()
+
+    def on_slab_k_plus(self):
+        self.slab_k_val += 1
+        self.slab_k_label.setText(f"K: {self.slab_k_val}")
+        if self.slab_mode_combo.currentText() != "Off":
+            self.reset_chain_length_to_one()
+            self._recalculate_slab_chains()
+
+    def on_chain_len_minus(self):
+        curr = self.chain_length_slider.value()
+        if curr > self.chain_length_slider.minimum():
+            self.chain_length_slider.setValue(curr - 1)
+
+    def on_chain_len_plus(self):
+        curr = self.chain_length_slider.value()
+        if curr < self.chain_length_slider.maximum():
+            self.chain_length_slider.setValue(curr + 1)
+
     def on_gauss_toggled(self, checked):
         if checked:
             if self.trace_chain_toggle.isChecked():
@@ -907,9 +971,12 @@ class DualPanelForceChainBuilder(QMainWindow):
         is_active = (mode != "Off")
 
         self.slab_thick_slider.setEnabled(is_active)
-        self.slab_k_slider.setEnabled(is_active)
+        self.slab_k_minus_btn.setEnabled(is_active)
+        self.slab_k_plus_btn.setEnabled(is_active)
         self.chain_length_slider.setEnabled(is_active)
         self.chain_length_input.setEnabled(is_active)
+        self.chain_len_minus_btn.setEnabled(is_active)
+        self.chain_len_plus_btn.setEnabled(is_active)
 
         if is_active:
             if self.gauss_toggle.isChecked():
@@ -940,9 +1007,7 @@ class DualPanelForceChainBuilder(QMainWindow):
 
     def on_slab_param_changed(self):
         pct = self.slab_thick_slider.value()
-        k = self.slab_k_slider.value()
         self.slab_thick_label.setText(f"Thick: {pct}%")
-        self.slab_k_label.setText(f"K: {k}")
 
         if self.slab_mode_combo.currentText() != "Off":
             self.reset_chain_length_to_one()
@@ -954,7 +1019,7 @@ class DualPanelForceChainBuilder(QMainWindow):
             return
 
         pct = self.slab_thick_slider.value()
-        k = self.slab_k_slider.value()
+        k = self.slab_k_val
         z_thickness = (pct / 100.0) * (self.z_max - self.z_min)
 
         if mode == "Upper Slab":
@@ -1367,10 +1432,13 @@ class DualPanelForceChainBuilder(QMainWindow):
                 self.slab_mode_combo.setCurrentText("Off")
                 self.slab_mode_combo.blockSignals(False)
                 self.slab_thick_slider.setEnabled(False)
-                self.slab_k_slider.setEnabled(False)
+                self.slab_k_minus_btn.setEnabled(False)
+                self.slab_k_plus_btn.setEnabled(False)
 
         self.chain_length_slider.setEnabled(checked)
         self.chain_length_input.setEnabled(checked)
+        self.chain_len_minus_btn.setEnabled(checked)
+        self.chain_len_plus_btn.setEnabled(checked)
         self.seed_id_input.setEnabled(checked)
         self.seed_apply_btn.setEnabled(checked)
 
@@ -1801,10 +1869,6 @@ class DualPanelForceChainBuilder(QMainWindow):
             self._recalculate_slab_chains()
         elif self.trace_chain_toggle.isChecked() and self.active_chain_root_node != -1:
             self._recalculate_full_chains_and_update(self.active_chain_root_node)
-
-        self.sync_clipping_ranges()
-        self.vtk_left.GetRenderWindow().Render()
-        self.update_right_subgraph()
 
         self.sync_clipping_ranges()
         self.vtk_left.GetRenderWindow().Render()

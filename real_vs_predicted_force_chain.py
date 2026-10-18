@@ -1887,11 +1887,86 @@ class DualPanelForceChainBuilder(QMainWindow):
             self.text_label_actors_right.append(txt_actor)
 
     def _generate_gauss_map_hemisphere(self, edges):
-        n_lat = 18   # 18 polar steps (5 degrees each)
-        n_lon = 36   # 36 azimuthal steps (10 degrees each)
+        """
+        Builds an equal-area triangulated upper-hemisphere Gauss map
+        using a subdivided regular geodesic icosahedron.
+        """
+        R = self.volume_span * 0.4
+        center = np.mean(self.coords, axis=0)
 
-        counts = np.zeros((n_lat, n_lon), dtype=np.float32)
+        # 1. Base Regular Icosahedron Vertices
+        phi_ratio = (1.0 + np.sqrt(5.0)) / 2.0
+        base_verts = [
+            [-1,  phi_ratio, 0], [ 1,  phi_ratio, 0], [-1, -phi_ratio, 0], [ 1, -phi_ratio, 0],
+            [0, -1,  phi_ratio], [0,  1,  phi_ratio], [0, -1, -phi_ratio], [0,  1, -phi_ratio],
+            [ phi_ratio, 0, -1], [ phi_ratio, 0,  1], [-phi_ratio, 0, -1], [-phi_ratio, 0,  1]
+        ]
+        base_verts = [np.array(v, dtype=np.float32) / np.linalg.norm(v) for v in base_verts]
 
+        base_faces = [
+            [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+            [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+            [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+            [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]
+        ]
+
+        # 2. Geodesic Subdivision (depth = 2 for ~320 equal-area triangles)
+        midpoint_cache = {}
+        verts = list(base_verts)
+
+        def get_midpoint(i1, i2):
+            edge_key = (min(i1, i2), max(i1, i2))
+            if edge_key in midpoint_cache:
+                return midpoint_cache[edge_key]
+            v_mid = (verts[i1] + verts[i2]) / 2.0
+            v_mid = v_mid / np.linalg.norm(v_mid)
+            idx = len(verts)
+            verts.append(v_mid)
+            midpoint_cache[edge_key] = idx
+            return idx
+
+        faces = base_faces
+        for _ in range(2):
+            new_faces = []
+            for tri in faces:
+                a, b, c = tri
+                ab = get_midpoint(a, b)
+                bc = get_midpoint(b, c)
+                ca = get_midpoint(c, a)
+                new_faces.extend([
+                    [a, ab, ca],
+                    [b, bc, ab],
+                    [c, ca, bc],
+                    [ab, bc, ca]
+                ])
+            faces = new_faces
+
+        # 3. Filter and Orient to Upper Hemisphere (z >= -0.01 to cover equator)
+        hemi_triangles = []
+        for tri in faces:
+            v0, v1, v2 = verts[tri[0]], verts[tri[1]], verts[tri[2]]
+            centroid = (v0 + v1 + v2) / 3.0
+            if centroid[2] >= -0.01:
+                # Clamp vertices to z >= 0 for a flat base
+                p0 = np.array([v0[0], v0[1], max(0.0, float(v0[2]))], dtype=np.float32)
+                p1 = np.array([v1[0], v1[1], max(0.0, float(v1[2]))], dtype=np.float32)
+                p2 = np.array([v2[0], v2[1], max(0.0, float(v2[2]))], dtype=np.float32)
+
+                # Ensure outward surface normal
+                normal = np.cross(p1 - p0, p2 - p0)
+                if np.dot(normal, centroid) < 0:
+                    p1, p2 = p2, p1
+
+                c_unit = centroid / np.linalg.norm(centroid)
+                hemi_triangles.append((p0, p1, p2, c_unit))
+
+        N_bins = len(hemi_triangles)
+        counts = np.zeros(N_bins, dtype=np.float32)
+
+        # Precompute centroids matrix (N_bins x 3) for fast vectorized dot-products
+        centroids_mat = np.array([tri[3] for tri in hemi_triangles], dtype=np.float32)
+
+        # 4. Bin Contact Vectors by Nearest Triangle Centroid (Equal Solid-Angle)
         for u, v, _ in edges:
             vec = self.coords[v] - self.coords[u]
             norm_v = np.linalg.norm(vec)
@@ -1899,86 +1974,50 @@ class DualPanelForceChainBuilder(QMainWindow):
                 continue
             n = vec / norm_v
 
-            # Undirected contact symmetry: flip to upper hemisphere (z >= 0)
+            # Undirected contact symmetry: flip to upper hemisphere
             if n[2] < 0:
                 n = -n
 
-            theta = np.arccos(np.clip(n[2], 0.0, 1.0))
-            phi = np.arctan2(n[1], n[0])
-            if phi < 0:
-                phi += 2.0 * np.pi
-
-            t_bin = min(int(theta / (0.5 * np.pi) * n_lat), n_lat - 1)
-            p_bin = min(int(phi / (2.0 * np.pi) * n_lon), n_lon - 1)
-            counts[t_bin, p_bin] += 1.0
+            # Find closest triangle on the hemisphere via maximum cosine similarity
+            best_bin = np.argmax(np.dot(centroids_mat, n))
+            counts[best_bin] += 1.0
 
         max_count = float(np.max(counts))
 
-        R = self.volume_span * 0.4
-        center = np.mean(self.coords, axis=0)
-
-        theta_vals = np.linspace(0.0, 0.5 * np.pi, n_lat + 1)
-        phi_vals = np.linspace(0.0, 2.0 * np.pi, n_lon + 1)
-
+        # 5. Build VTK PolyData for the Equi-Area Triangulated Dome
         pts = vtk.vtkPoints()
-
-        for i in range(n_lat + 1):
-            th = theta_vals[i]
-            sin_th = np.sin(th)
-            cos_th = np.cos(th)
-
-            for j in range(n_lon + 1):
-                ph = phi_vals[j]
-                x = center[0] + R * sin_th * np.cos(ph)
-                y = center[1] + R * sin_th * np.sin(ph)
-                z = center[2] + R * cos_th
-                pts.InsertNextPoint(x, y, z)
-
         polys = vtk.vtkCellArray()
         cell_scalars = vtk.vtkFloatArray()
         cell_scalars.SetName("ContactCount")
 
-        for i in range(n_lat):
-            for j in range(n_lon):
-                idx0 = i * (n_lon + 1) + j
-                idx1 = idx0 + 1
-                idx2 = (i + 1) * (n_lon + 1) + (j + 1)
-                idx3 = (i + 1) * (n_lon + 1) + j
+        pt_counter = 0
+        for i, (p0, p1, p2, _) in enumerate(hemi_triangles):
+            pts.InsertNextPoint(center[0] + R * p0[0], center[1] + R * p0[1], center[2] + R * p0[2])
+            pts.InsertNextPoint(center[0] + R * p1[0], center[1] + R * p1[1], center[2] + R * p1[2])
+            pts.InsertNextPoint(center[0] + R * p2[0], center[1] + R * p2[1], center[2] + R * p2[2])
 
-                quad = vtk.vtkQuad()
-                quad.GetPointIds().SetId(0, idx0)
-                quad.GetPointIds().SetId(1, idx3)
-                quad.GetPointIds().SetId(2, idx2)
-                quad.GetPointIds().SetId(3, idx1)
-                polys.InsertNextCell(quad)
-
-                cell_scalars.InsertNextValue(counts[i, j])
-
-        # Base floor cap
-        floor_center_idx = pts.InsertNextPoint(center[0], center[1], center[2])
-        equator_start_idx = n_lat * (n_lon + 1)
-        for j in range(n_lon):
             tri = vtk.vtkTriangle()
-            tri.GetPointIds().SetId(0, floor_center_idx)
-            tri.GetPointIds().SetId(1, equator_start_idx + j)
-            tri.GetPointIds().SetId(2, equator_start_idx + j + 1)
+            tri.GetPointIds().SetId(0, pt_counter)
+            tri.GetPointIds().SetId(1, pt_counter + 1)
+            tri.GetPointIds().SetId(2, pt_counter + 2)
             polys.InsertNextCell(tri)
-            cell_scalars.InsertNextValue(0.0)
+
+            cell_scalars.InsertNextValue(counts[i])
+            pt_counter += 3
 
         polydata = vtk.vtkPolyData()
         polydata.SetPoints(pts)
         polydata.SetPolys(polys)
         polydata.GetCellData().SetScalars(cell_scalars)
 
+        # Smooth normals for clean faceted shading
         normals = vtk.vtkPolyDataNormals()
         normals.SetInputData(polydata)
-        normals.ComputeCellNormalsOff()
-        normals.ComputePointNormalsOn()
-        normals.ConsistencyOn()
-        normals.AutoOrientNormalsOn()
+        normals.ComputePointNormalsOff()
+        normals.ComputeCellNormalsOn()
         normals.Update()
 
-        # Equator circle
+        # 6. Baseline Equator Circle Ring at z = center[2]
         equator_pts = vtk.vtkPoints()
         equator_lines = vtk.vtkCellArray()
         n_circ = 72

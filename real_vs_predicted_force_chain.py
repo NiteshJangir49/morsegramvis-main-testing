@@ -341,17 +341,17 @@ def load_real_and_predicted_data(assembly_id=58, timestep=80):
     pos_x_path = resolve_path(actual_dir, f"{assembly_id}_{timestep}_ball_pos_x.tab")
     pos_y_path = resolve_path(actual_dir, f"{assembly_id}_{timestep}_ball_pos_y.tab")
     pos_z_path = resolve_path(actual_dir, f"{assembly_id}_{timestep}_ball_pos_z.tab")
-    actual_npmncf_path = resolve_path(actual_dir, f"{assembly_id}_{timestep}_ball_NPMNCF.tab")
 
     pred_npmncf_path = resolve_path(predicted_dir, f"assembly_{assembly_id:02d}_timestep_{timestep:02d}_predicted_npmncf.csv")
     if not os.path.exists(pred_npmncf_path):
         pred_npmncf_path = resolve_path(predicted_dir, f"assembly_{assembly_id}_timestep_{timestep}_predicted_npmncf.csv")
 
-    for path in [pos_x_path, pos_y_path, pos_z_path, actual_npmncf_path, pred_npmncf_path]:
+    for path in [pos_x_path, pos_y_path, pos_z_path, pred_npmncf_path]:
         if not os.path.exists(path):
             print(f"[Error] Missing required file for Timestep {timestep}: {path}")
             return None, None, None, None, None, None, None
 
+    # Load particle spatial coordinates from .tab files
     df_x = pd.read_csv(pos_x_path, sep=r'\s+', skiprows=2, header=None, names=['ball_id', 'x'])
     df_y = pd.read_csv(pos_y_path, sep=r'\s+', skiprows=2, header=None, names=['ball_id', 'y'])
     df_z = pd.read_csv(pos_z_path, sep=r'\s+', skiprows=2, header=None, names=['ball_id', 'z'])
@@ -362,25 +362,9 @@ def load_real_and_predicted_data(assembly_id=58, timestep=80):
 
     df_coords = df_x.merge(df_y, on='ball_id').merge(df_z, on='ball_id')
 
-    df_actual = pd.read_csv(actual_npmncf_path, sep=r'\s+', skiprows=2, header=None, names=['ball_id', 'npmncf_raw'])
-    df_actual['ball_id'] = pd.to_numeric(df_actual['ball_id'], errors='coerce')
-    df_actual.dropna(subset=['ball_id'], inplace=True)
-    df_actual['ball_id'] = df_actual['ball_id'].astype(int)
-
-    raw_mean_force = df_actual['npmncf_raw'].mean()
-    df_actual['node_weight_actual'] = df_actual['npmncf_raw'] / raw_mean_force if raw_mean_force > 0 else df_actual['npmncf_raw']
-
-    normalized_mean_force = df_actual['node_weight_actual'].mean()
-    print("\n" + "=" * 60)
-    print(f"FORCE NORMALIZATION CHECK (Timestep {timestep} - Volume A):")
-    print(f"  Raw Force Mean (raw NPMNCF)        : {raw_mean_force:.6f}")
-    print(f"  Normalized Force Mean (Vol A Nodes): {normalized_mean_force:.6f}")
-    print("=" * 60 + "\n")
-
+    # Load node force values directly from the CSV
     df_pred = pd.read_csv(pred_npmncf_path)
-
-    df_nodes = df_pred.merge(df_actual[['ball_id', 'node_weight_actual']], on='ball_id', how='inner')
-    df_nodes = df_nodes.merge(df_coords, on='ball_id', how='inner')
+    df_nodes = df_pred.merge(df_coords, on='ball_id', how='inner')
 
     ball_ids = df_nodes['ball_id'].values
     num_nodes = len(ball_ids)
@@ -388,9 +372,28 @@ def load_real_and_predicted_data(assembly_id=58, timestep=80):
 
     coords = df_nodes[['x', 'y', 'z']].values.astype(np.float32) * 100.0
 
-    node_weights_a = df_nodes['node_weight_actual'].values.astype(np.float32)
+    # Volume A: Use actual force from CSV
+    if 'actual_npmncf' in df_nodes.columns:
+        raw_a = df_nodes['actual_npmncf'].values.astype(np.float32)
+    else:
+        fallback_col = [c for c in df_nodes.columns if 'actual' in c.lower()]
+        raw_a = df_nodes[fallback_col[0]].values.astype(np.float32) if fallback_col else np.ones(num_nodes, dtype=np.float32)
+
+    mean_a = float(np.mean(raw_a)) if len(raw_a) > 0 else 1.0
+    node_weights_a = (raw_a / mean_a).astype(np.float32) if mean_a > 0 else raw_a
+
+    # Volume B: GNN predicted forces
     node_weights_b = df_nodes['predicted_npmncf'].values.astype(np.float32)
 
+    print("\n" + "=" * 60)
+    print(f"FORCE VALUES CHECK (Timestep {timestep}):")
+    print(f"  Vol A Node Force Mean (CSV actual): {np.mean(node_weights_a):.6f}")
+    print(f"  Vol A Node Force Max  (CSV actual): {np.max(node_weights_a):.6f}")
+    print(f"  Vol B Node Force Mean (Predicted) : {np.mean(node_weights_b):.6f}")
+    print(f"  Vol B Node Force Max  (Predicted) : {np.max(node_weights_b):.6f}")
+    print("=" * 60 + "\n")
+
+    # Load connectivity / contact topology
     end1_path = resolve_path(actual_dir, f"{assembly_id}_{timestep}_contact_end1.tab")
     end2_path = resolve_path(actual_dir, f"{assembly_id}_{timestep}_contact_end2.tab")
     pred_contact_path = resolve_path(predicted_dir, f"assembly_{assembly_id:02d}_timestep_{timestep:02d}_predicted_contact_force.csv")
@@ -577,9 +580,10 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         self.compute_spatial_bounds()
 
-        all_w = np.concatenate([weights_a[weights_a > 0], weights_b[weights_b > 0]])
+        # Base slider ceiling on the true maximum node weight across datasets
+        all_nodes_max = max(float(np.max(self.node_weights_a)), float(np.max(self.node_weights_b)))
         self.global_min_w = 0.0
-        self.global_max_w = float(np.max(all_w)) if len(all_w) > 0 else 1.0
+        self.global_max_w = all_nodes_max if all_nodes_max > 0 else 1.0
         self.active_min_w = 0.0
         self.active_max_w = self.global_max_w
 
@@ -1122,9 +1126,10 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.num_nodes = len(coords)
         self.id_to_idx = {bid: idx for idx, bid in enumerate(ball_ids)}
 
-        all_w = np.concatenate([weights_a[weights_a > 0], weights_b[weights_b > 0]])
-        self.global_max_w = float(np.max(all_w)) if len(all_w) > 0 else 1.0
+        all_nodes_max = max(float(np.max(self.node_weights_a)), float(np.max(self.node_weights_b)))
+        self.global_max_w = all_nodes_max if all_nodes_max > 0 else 1.0
         self.range_slider.setMaxForceVal(self.global_max_w)
+        self.max_weight_input.setText(f"{self.global_max_w:.2f}")
         self.update_range_validators()
 
         self.compute_spatial_bounds()
@@ -1175,9 +1180,17 @@ class DualPanelForceChainBuilder(QMainWindow):
         return lut
 
     def create_lut_gauss(self):
+        """
+        Pure linear gradient: White (least values) to Dark Navy Blue (maximum values).
+        """
         lut = vtk.vtkLookupTable()
         lut.SetNumberOfTableValues(256)
-        lut.SetHueRange(0.667, 0.0)
+        for i in range(256):
+            t = i / 255.0
+            r = 1.0 - t
+            g = 1.0 - 0.92 * t
+            b = 1.0 - 0.45 * t
+            lut.SetTableValue(i, r, g, b, 1.0)
         lut.Build()
         return lut
 
@@ -1333,11 +1346,11 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.ren_right.AddActor(self.right_actor_chains_b)
 
         # ======================================================================
-        # 3D GAUSS MAP HEMISPHERE & COLORBAR ACTORS
+        # 3D GAUSS MAP SPHERE & COLORBAR ACTORS
         # ======================================================================
         self.lut_gauss = self.create_lut_gauss()
 
-        # 1. Colored Surface
+        # 1. Colored Surface (Full Opacity)
         self.gauss_surface_polydata = vtk.vtkPolyData()
         self.gauss_surface_mapper = vtk.vtkPolyDataMapper()
         self.gauss_surface_mapper.SetInputData(self.gauss_surface_polydata)
@@ -1346,12 +1359,12 @@ class DualPanelForceChainBuilder(QMainWindow):
 
         self.gauss_surface_actor = vtk.vtkActor()
         self.gauss_surface_actor.SetMapper(self.gauss_surface_mapper)
-        self.gauss_surface_actor.GetProperty().SetOpacity(0.92)
-        self.gauss_surface_actor.GetProperty().SetSpecular(0.25)
+        self.gauss_surface_actor.GetProperty().SetOpacity(1.0)
+        self.gauss_surface_actor.GetProperty().SetSpecular(0.20)
         self.gauss_surface_actor.SetVisibility(False)
         self.ren_right.AddActor(self.gauss_surface_actor)
 
-        # 2. Wireframe Reference Grid
+        # 2. Wireframe Reference Grid (Subtle contrast)
         self.gauss_wire_mapper = vtk.vtkPolyDataMapper()
         self.gauss_wire_mapper.SetInputData(self.gauss_surface_polydata)
         self.gauss_wire_mapper.ScalarVisibilityOff()
@@ -1359,24 +1372,12 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.gauss_wire_actor = vtk.vtkActor()
         self.gauss_wire_actor.SetMapper(self.gauss_wire_mapper)
         self.gauss_wire_actor.GetProperty().SetRepresentationToWireframe()
-        self.gauss_wire_actor.GetProperty().SetColor(0.2, 0.2, 0.3)
-        self.gauss_wire_actor.GetProperty().SetLineWidth(0.8)
+        self.gauss_wire_actor.GetProperty().SetColor(0.4, 0.45, 0.55)
+        self.gauss_wire_actor.GetProperty().SetLineWidth(0.6)
         self.gauss_wire_actor.SetVisibility(False)
         self.ren_right.AddActor(self.gauss_wire_actor)
 
-        # 3. Equator Baseline Circle
-        self.gauss_equator_polydata = vtk.vtkPolyData()
-        self.gauss_equator_mapper = vtk.vtkPolyDataMapper()
-        self.gauss_equator_mapper.SetInputData(self.gauss_equator_polydata)
-
-        self.gauss_equator_actor = vtk.vtkActor()
-        self.gauss_equator_actor.SetMapper(self.gauss_equator_mapper)
-        self.gauss_equator_actor.GetProperty().SetColor(0.7, 0.7, 0.8)
-        self.gauss_equator_actor.GetProperty().SetLineWidth(2.0)
-        self.gauss_equator_actor.SetVisibility(False)
-        self.ren_right.AddActor(self.gauss_equator_actor)
-
-        # 4. Scalar Color Bar with Ticks & Values (Title Removed)
+        # 3. Scalar Color Bar with Ticks & Values
         self.scalar_bar = vtk.vtkScalarBarActor()
         self.scalar_bar.SetLookupTable(self.lut_gauss)
         self.scalar_bar.SetTitle("")
@@ -1685,66 +1686,30 @@ class DualPanelForceChainBuilder(QMainWindow):
         return path
 
     def apply_thresholds(self, min_weight_threshold, max_weight_threshold):
-        raw_edges_a = []
-        raw_edges_b = []
         mode = self.edge_mode_combo.currentText()
 
-        # Strict independent thresholding
-        for (u, v, wa, wb) in self.all_edges:
-            edge_a_active = (wa > 0 and min_weight_threshold <= wa <= max_weight_threshold)
-            edge_b_active = (wb > 0 and min_weight_threshold <= wb <= max_weight_threshold)
+        # ======================================================================
+        # STEP 1: STRICT NODE FILTERING FIRST
+        # ======================================================================
+        nodes_a_pass = set(
+            i for i in range(self.num_nodes)
+            if min_weight_threshold <= self.node_weights_a[i] <= max_weight_threshold
+        )
+        nodes_b_pass = set(
+            i for i in range(self.num_nodes)
+            if min_weight_threshold <= self.node_weights_b[i] <= max_weight_threshold
+        )
 
-            if mode == "Only from A":
-                if edge_a_active:
-                    raw_edges_a.append((u, v, wa))
-            elif mode == "Only from B":
-                if edge_b_active:
-                    raw_edges_b.append((u, v, wb))
-            elif mode == "Both (Intersection)":
-                if edge_a_active and edge_b_active:
-                    raw_edges_a.append((u, v, wa))
-                    raw_edges_b.append((u, v, wb))
-            else:  # Default (Union)
-                if edge_a_active:
-                    raw_edges_a.append((u, v, wa))
-                if edge_b_active:
-                    raw_edges_b.append((u, v, wb))
+        if mode == "Only from A":
+            active_node_set = nodes_a_pass
+        elif mode == "Only from B":
+            active_node_set = nodes_b_pass
+        elif mode == "Both (Intersection)":
+            active_node_set = nodes_a_pass.intersection(nodes_b_pass)
+        else:  # Default (Union)
+            active_node_set = nodes_a_pass.union(nodes_b_pass)
 
-        if self.max_neighbor_toggle.isChecked():
-            self.active_edges_a = self._filter_highest_force_neighbor_edges(raw_edges_a)
-            self.active_edges_b = self._filter_highest_force_neighbor_edges(raw_edges_b)
-        else:
-            self.active_edges_a = raw_edges_a
-            self.active_edges_b = raw_edges_b
-
-        # Collect particles with active incident edges
-        nodes_with_edges = set()
-        for (u, v, _) in self.active_edges_a:
-            nodes_with_edges.add(u)
-            nodes_with_edges.add(v)
-        for (u, v, _) in self.active_edges_b:
-            nodes_with_edges.add(u)
-            nodes_with_edges.add(v)
-
-        # UNIFIED NODE VISIBILITY: Include nodes touching edges AND nodes matching threshold directly
-        visible_nodes = set(nodes_with_edges)
-        for i in range(self.num_nodes):
-            if mode == "Only from A":
-                if min_weight_threshold <= self.node_weights_a[i] <= max_weight_threshold:
-                    visible_nodes.add(i)
-            elif mode == "Only from B":
-                if min_weight_threshold <= self.node_weights_b[i] <= max_weight_threshold:
-                    visible_nodes.add(i)
-            elif mode == "Both (Intersection)":
-                if (min_weight_threshold <= self.node_weights_a[i] <= max_weight_threshold) and \
-                   (min_weight_threshold <= self.node_weights_b[i] <= max_weight_threshold):
-                    visible_nodes.add(i)
-            else:  # Default (Union)
-                if (min_weight_threshold <= self.node_weights_a[i] <= max_weight_threshold) or \
-                   (min_weight_threshold <= self.node_weights_b[i] <= max_weight_threshold):
-                    visible_nodes.add(i)
-
-        self.active_visible_nodes_left = sorted(list(visible_nodes))
+        self.active_visible_nodes_left = sorted(list(active_node_set))
 
         if len(self.active_visible_nodes_left) == 0:
             self.left_actor_nodes.SetVisibility(False)
@@ -1763,9 +1728,48 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.update_particle_colors()
         self.left_actor_nodes.SetVisibility(True)
 
+        visible_set = set(self.active_visible_nodes_left)
+
+        # ======================================================================
+        # STEP 2: INDUCED EDGE FILTERING (BOTH ENDPOINTS MUST BE VISIBLE)
+        # ======================================================================
+        raw_edges_a = []
+        raw_edges_b = []
+
+        for (u, v, _, _) in self.all_edges:
+            if u in visible_set and v in visible_set:
+                w_edge_a = min(self.node_weights_a[u], self.node_weights_a[v])
+                w_edge_b = min(self.node_weights_b[u], self.node_weights_b[v])
+
+                if mode == "Only from A":
+                    if u in nodes_a_pass and v in nodes_a_pass and w_edge_a > 0:
+                        raw_edges_a.append((u, v, w_edge_a))
+                elif mode == "Only from B":
+                    if u in nodes_b_pass and v in nodes_b_pass and w_edge_b > 0:
+                        raw_edges_b.append((u, v, w_edge_b))
+                elif mode == "Both (Intersection)":
+                    if (u in nodes_a_pass and v in nodes_a_pass and w_edge_a > 0) and \
+                       (u in nodes_b_pass and v in nodes_b_pass and w_edge_b > 0):
+                        raw_edges_a.append((u, v, w_edge_a))
+                        raw_edges_b.append((u, v, w_edge_b))
+                else:  # Default (Union)
+                    if u in nodes_a_pass and v in nodes_a_pass and w_edge_a > 0:
+                        raw_edges_a.append((u, v, w_edge_a))
+                    if u in nodes_b_pass and v in nodes_b_pass and w_edge_b > 0:
+                        raw_edges_b.append((u, v, w_edge_b))
+
+        if self.max_neighbor_toggle.isChecked():
+            self.active_edges_a = self._filter_highest_force_neighbor_edges(raw_edges_a)
+            self.active_edges_b = self._filter_highest_force_neighbor_edges(raw_edges_b)
+        else:
+            self.active_edges_a = raw_edges_a
+            self.active_edges_b = raw_edges_b
+
+        # ======================================================================
+        # STEP 3: BUILD VTK PARALLEL OFFSET LINES
+        # ======================================================================
         delta_offset = 0.008
 
-        # --- Volume A Parallel Lines ---
         lines_a = vtk.vtkCellArray()
         line_pts_a = vtk.vtkPoints()
         edge_weight_list_a = []
@@ -1796,7 +1800,6 @@ class DualPanelForceChainBuilder(QMainWindow):
             edge_weight_list_a.append(wa)
             pt_idx_a += 2
 
-        # --- Volume B Parallel Lines ---
         lines_b = vtk.vtkCellArray()
         line_pts_b = vtk.vtkPoints()
         edge_weight_list_b = []
@@ -1833,19 +1836,17 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.right_actor_chains_a.GetProperty().SetLineWidth(line_width)
         self.right_actor_chains_b.GetProperty().SetLineWidth(line_width)
 
-        combined_active_weights = edge_weight_list_a + edge_weight_list_b
-        if len(combined_active_weights) > 0:
-            self.active_min_w = float(np.min(combined_active_weights))
-            self.active_max_w = float(np.max(combined_active_weights))
-            if self.active_min_w == self.active_max_w:
-                self.active_max_w += 1e-5
+        self.active_min_w = float(min_weight_threshold)
+        self.active_max_w = float(max_weight_threshold)
+        if self.active_min_w == self.active_max_w:
+            self.active_max_w += 1e-5
 
-            self.lut_a.SetTableRange(self.active_min_w, self.active_max_w)
-            self.lut_b.SetTableRange(self.active_min_w, self.active_max_w)
-            self.left_chains_a_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
-            self.left_chains_b_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
-            self.right_chains_a_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
-            self.right_chains_b_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
+        self.lut_a.SetTableRange(self.active_min_w, self.active_max_w)
+        self.lut_b.SetTableRange(self.active_min_w, self.active_max_w)
+        self.left_chains_a_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
+        self.left_chains_b_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
+        self.right_chains_a_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
+        self.right_chains_b_mapper.SetScalarRange(self.active_min_w, self.active_max_w)
 
         if len(edge_weight_list_a) > 0:
             arr_a = numpy_to_vtk(np.array(edge_weight_list_a, dtype=np.float32), deep=True)
@@ -1865,6 +1866,19 @@ class DualPanelForceChainBuilder(QMainWindow):
         else:
             self.left_actor_chains_b.SetVisibility(False)
 
+        # Count isolated rattlers (visible nodes without active incident edges)
+        connected_nodes = set()
+        for u, v, _ in self.active_edges_a:
+            connected_nodes.add(u); connected_nodes.add(v)
+        for u, v, _ in self.active_edges_b:
+            connected_nodes.add(u); connected_nodes.add(v)
+        num_rattlers = len(self.active_visible_nodes_left) - len(connected_nodes.intersection(visible_set))
+
+        print(f"[Threshold T={min_weight_threshold:.2f}..{max_weight_threshold:.2f}] "
+              f"Visible Nodes: {len(self.active_visible_nodes_left)} | "
+              f"Active Edges (A: {len(self.active_edges_a)}, B: {len(self.active_edges_b)}) | "
+              f"Rattlers: {num_rattlers}")
+
         if self.slab_mode_combo.currentText() != "Off":
             self._recalculate_slab_chains()
         elif self.trace_chain_toggle.isChecked() and self.active_chain_root_node != -1:
@@ -1873,25 +1887,6 @@ class DualPanelForceChainBuilder(QMainWindow):
         self.sync_clipping_ranges()
         self.vtk_left.GetRenderWindow().Render()
         self.update_right_subgraph()
-
-        # ======================================================================
-        # DIAGNOSTIC CHECK: Rogue Node Counter for Volume A vs Volume B
-        # ======================================================================
-        nodes_a_above_T = set(np.where(self.node_weights_a >= min_weight_threshold)[0])
-        edge_nodes_a = set()
-        for u, v, _ in self.active_edges_a:
-            edge_nodes_a.add(u)
-            edge_nodes_a.add(v)
-        rogue_a = nodes_a_above_T - edge_nodes_a
-
-        nodes_b_above_T = set(np.where(self.node_weights_b >= min_weight_threshold)[0])
-        edge_nodes_b = set()
-        for u, v, _ in self.active_edges_b:
-            edge_nodes_b.add(u)
-            edge_nodes_b.add(v)
-        rogue_b = nodes_b_above_T - edge_nodes_b
-
-        print(f"[Diagnostic T={min_weight_threshold:.2f}] Rogue Nodes -> Vol A: {len(rogue_a)} / {len(nodes_a_above_T)} | Vol B: {len(rogue_b)} / {len(nodes_b_above_T)}")
 
     def update_particle_colors(self):
         self.left_particle_colors.Reset()
@@ -1952,8 +1947,8 @@ class DualPanelForceChainBuilder(QMainWindow):
 
     def _generate_gauss_map_hemisphere(self, edges):
         """
-        Builds an equal-area triangulated upper-hemisphere Gauss map
-        using a subdivided regular geodesic icosahedron.
+        Builds an equal-area triangulated full-sphere Gauss map using a
+        subdivided regular geodesic icosahedron with exact antipodal symmetry.
         """
         R = self.volume_span * 0.4
         center = np.mean(self.coords, axis=0)
@@ -1974,7 +1969,7 @@ class DualPanelForceChainBuilder(QMainWindow):
             [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]
         ]
 
-        # 2. Geodesic Subdivision (depth = 2 for ~320 equal-area triangles)
+        # 2. Geodesic Subdivision (depth = 2 => 320 equal-area triangles over full sphere)
         midpoint_cache = {}
         verts = list(base_verts)
 
@@ -2005,32 +2000,32 @@ class DualPanelForceChainBuilder(QMainWindow):
                 ])
             faces = new_faces
 
-        # 3. Filter and Orient to Upper Hemisphere (z >= -0.01 to cover equator)
-        hemi_triangles = []
+        # 3. Orient All Triangles on the Full Sphere
+        sphere_triangles = []
         for tri in faces:
             v0, v1, v2 = verts[tri[0]], verts[tri[1]], verts[tri[2]]
             centroid = (v0 + v1 + v2) / 3.0
-            if centroid[2] >= -0.01:
-                # Clamp vertices to z >= 0 for a flat base
-                p0 = np.array([v0[0], v0[1], max(0.0, float(v0[2]))], dtype=np.float32)
-                p1 = np.array([v1[0], v1[1], max(0.0, float(v1[2]))], dtype=np.float32)
-                p2 = np.array([v2[0], v2[1], max(0.0, float(v2[2]))], dtype=np.float32)
+            c_unit = centroid / np.linalg.norm(centroid)
 
-                # Ensure outward surface normal
-                normal = np.cross(p1 - p0, p2 - p0)
-                if np.dot(normal, centroid) < 0:
-                    p1, p2 = p2, p1
+            # Ensure outward surface normal
+            normal = np.cross(v1 - v0, v2 - v0)
+            if np.dot(normal, c_unit) < 0:
+                v1, v2 = v2, v1
 
-                c_unit = centroid / np.linalg.norm(centroid)
-                hemi_triangles.append((p0, p1, p2, c_unit))
+            sphere_triangles.append((v0, v1, v2, c_unit))
 
-        N_bins = len(hemi_triangles)
+        N_bins = len(sphere_triangles)
         counts = np.zeros(N_bins, dtype=np.float32)
 
-        # Precompute centroids matrix (N_bins x 3) for fast vectorized dot-products
-        centroids_mat = np.array([tri[3] for tri in hemi_triangles], dtype=np.float32)
+        # Precompute matrix of centroids (320 x 3)
+        centroids_mat = np.array([tri[3] for tri in sphere_triangles], dtype=np.float32)
 
-        # 4. Bin Contact Vectors by Nearest Triangle Centroid (Equal Solid-Angle)
+        # Precompute antipodal (opposite) triangle index for each face
+        antipodal_indices = np.zeros(N_bins, dtype=int)
+        for i in range(N_bins):
+            antipodal_indices[i] = np.argmax(np.dot(centroids_mat, -centroids_mat[i]))
+
+        # 4. Bin Contact Vectors with Antipodal Symmetry
         for u, v, _ in edges:
             vec = self.coords[v] - self.coords[u]
             norm_v = np.linalg.norm(vec)
@@ -2038,24 +2033,24 @@ class DualPanelForceChainBuilder(QMainWindow):
                 continue
             n = vec / norm_v
 
-            # Undirected contact symmetry: flip to upper hemisphere
-            if n[2] < 0:
-                n = -n
-
-            # Find closest triangle on the hemisphere via maximum cosine similarity
+            # Find the best aligned triangle on the sphere
             best_bin = np.argmax(np.dot(centroids_mat, n))
+            opp_bin = antipodal_indices[best_bin]
+
+            # Increment both opposite faces equally
             counts[best_bin] += 1.0
+            counts[opp_bin] += 1.0
 
         max_count = float(np.max(counts))
 
-        # 5. Build VTK PolyData for the Equi-Area Triangulated Dome
+        # 5. Build VTK PolyData for the Opaque Symmetrical Sphere
         pts = vtk.vtkPoints()
         polys = vtk.vtkCellArray()
         cell_scalars = vtk.vtkFloatArray()
         cell_scalars.SetName("ContactCount")
 
         pt_counter = 0
-        for i, (p0, p1, p2, _) in enumerate(hemi_triangles):
+        for i, (p0, p1, p2, _) in enumerate(sphere_triangles):
             pts.InsertNextPoint(center[0] + R * p0[0], center[1] + R * p0[1], center[2] + R * p0[2])
             pts.InsertNextPoint(center[0] + R * p1[0], center[1] + R * p1[1], center[2] + R * p1[2])
             pts.InsertNextPoint(center[0] + R * p2[0], center[1] + R * p2[1], center[2] + R * p2[2])
@@ -2074,39 +2069,16 @@ class DualPanelForceChainBuilder(QMainWindow):
         polydata.SetPolys(polys)
         polydata.GetCellData().SetScalars(cell_scalars)
 
-        # Smooth normals for clean faceted shading
         normals = vtk.vtkPolyDataNormals()
         normals.SetInputData(polydata)
         normals.ComputePointNormalsOff()
         normals.ComputeCellNormalsOn()
         normals.Update()
 
-        # 6. Baseline Equator Circle Ring at z = center[2]
-        equator_pts = vtk.vtkPoints()
-        equator_lines = vtk.vtkCellArray()
-        n_circ = 72
-        for k in range(n_circ + 1):
-            ang = (k / float(n_circ)) * 2.0 * np.pi
-            ex = center[0] + R * np.cos(ang)
-            ey = center[1] + R * np.sin(ang)
-            ez = center[2]
-            equator_pts.InsertNextPoint(ex, ey, ez)
-            if k > 0:
-                line = vtk.vtkLine()
-                line.GetPointIds().SetId(0, k - 1)
-                line.GetPointIds().SetId(1, k)
-                equator_lines.InsertNextCell(line)
-
-        equator_poly = vtk.vtkPolyData()
-        equator_poly.SetPoints(equator_pts)
-        equator_poly.SetLines(equator_lines)
-
-        return normals.GetOutput(), equator_poly, 0.0, max(1.0, max_count)
+        return normals.GetOutput(), 0.0, max(1.0, max_count)
 
     def update_right_subgraph(self):
-        # ======================================================================
-        # MODE 1: 3D GAUSS MAP ON UPPER HEMISPHERE (ACTIVE ON ONLY A / ONLY B)
-        # ======================================================================
+        # MODE 1: 3D GAUSS MAP ON FULL SPHERE (ACTIVE ON ONLY A / ONLY B)
         if self.gauss_toggle.isChecked():
             self.right_actor_nodes.SetVisibility(False)
             self.right_actor_chains_a.SetVisibility(False)
@@ -2115,35 +2087,29 @@ class DualPanelForceChainBuilder(QMainWindow):
 
             mode = self.edge_mode_combo.currentText()
             edges = self.active_edges_a if mode == "Only from A" else self.active_edges_b
-            polydata, equator_poly, min_c, max_c = self._generate_gauss_map_hemisphere(edges)
+            polydata, min_c, max_c = self._generate_gauss_map_hemisphere(edges)
 
             if polydata.GetNumberOfPoints() > 0:
                 self.gauss_surface_polydata.ShallowCopy(polydata)
                 self.gauss_surface_mapper.SetScalarRange(min_c, max_c)
                 self.lut_gauss.SetTableRange(min_c, max_c)
+                self.gauss_surface_actor.GetProperty().SetOpacity(1.0)
                 self.gauss_surface_actor.SetVisibility(True)
                 self.gauss_wire_actor.SetVisibility(True)
-
-                self.gauss_equator_polydata.ShallowCopy(equator_poly)
-                self.gauss_equator_actor.SetVisibility(True)
 
                 self.scalar_bar.SetVisibility(True)
             else:
                 self.gauss_surface_actor.SetVisibility(False)
                 self.gauss_wire_actor.SetVisibility(False)
-                self.gauss_equator_actor.SetVisibility(False)
                 self.scalar_bar.SetVisibility(False)
 
             self.sync_clipping_ranges()
             self.vtk_right.GetRenderWindow().Render()
             return
 
-        # ======================================================================
         # MODE 2: STANDARD FORCE CHAINS & PARTICLES
-        # ======================================================================
         self.gauss_surface_actor.SetVisibility(False)
         self.gauss_wire_actor.SetVisibility(False)
-        self.gauss_equator_actor.SetVisibility(False)
         self.scalar_bar.SetVisibility(False)
 
         self.current_selected_nodes_right = sorted(list(self.selected_node_indices))
@@ -2180,7 +2146,7 @@ class DualPanelForceChainBuilder(QMainWindow):
                 return (min(u, v), max(u, v)) in self.traced_chain_edges_b
             return (u in self.selected_node_indices and v in self.selected_node_indices)
 
-        # --- Right Subgraph Volume A Parallel Edges ---
+        # Right Subgraph Volume A Parallel Edges
         lines_a = vtk.vtkCellArray()
         line_pts_a = vtk.vtkPoints()
         edge_weight_list_a = []
@@ -2212,7 +2178,7 @@ class DualPanelForceChainBuilder(QMainWindow):
                 edge_weight_list_a.append(wa)
                 pt_idx_a += 2
 
-        # --- Right Subgraph Volume B Parallel Edges ---
+        # Right Subgraph Volume B Parallel Edges
         lines_b = vtk.vtkCellArray()
         line_pts_b = vtk.vtkPoints()
         edge_weight_list_b = []
